@@ -1,5 +1,5 @@
 ### ################ Occupancy Modeling by Heather Gaya.  ########
-###### Last updated April 2, 2020.                          #######
+###### Last updated March 29, 2020.                          #######
 ###### Email heather.e.gaya@gmail.com for questions          #######
 ###### find me on Twitter @doofgradstudent                   ##### 
 
@@ -66,7 +66,7 @@ model {
       # each i is a site, each t is a time period 
       # Link function for detection model
       logit(p[i,t]) <- p.b0 + p.b1*noise[i,t]
-      #Notice that have to use nested indexing to account for the 5 possible noise levels
+    
       #again, the probability needs to be between 0 and 1 so we put it on the logit scale
       
       #The actually observed data is obs[i,t]
