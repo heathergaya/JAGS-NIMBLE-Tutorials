@@ -78,6 +78,38 @@ model {
 }
 "
 
+### A note about the switches ####
+#Right now we have:
+logit(psi[i]) <- psi.b0 + switch[1]*psi.b1*elevation[i] + switch[2]*psi.b2*rainfall[i] 
+m[b] <- (b == 1 + switch[1] + 2*switch[2])
+
+#This gives us 4 options: both off, both on, switch 1 on or switch 2 on.
+#Say they're both off. The above equation evaluates to 1 + 0 + 2*0 = 1. So model 1 is both off
+# How about just switch 2 on? 1+ 0 + 2*1 = 3. So model 3 is just rainfall on. 
+# Both on = 1+1+2*1 = 4. Yay model 4 is both on
+# the equation then asks, "does this equal b?" so that only when b = 4 will model 4 receive a "TRUE" aka a "1". so if the answer is model 2, m = c(0,1,0,0). If model 4 is correct, m = c(0,0,0,4)
+
+#Just as an example, let's say we have 3 switches
+logit(psi[i]) <- psi.b0 + switch[1]*psi.b1*elevation[i] + switch[2]*psi.b2*rainfall[i] + 
+  switch[3]*psi.b3*something[i]
+
+
+#so instead we'd have:
+m[b] <- (b == 1 + switch[1] + 2*switch[2]+4*switch[3])
+#which gives us the following models:
+#all off = 1+ 0 + 0 +0 = 1
+#switch 1 only = 1+1+0+0 = 2
+# switch 2 only = 1+0+2+0 = 3
+# switch 1 and 2 = 1+1+2+0 = 4 
+#switch 3 only = 1+0+0+4 = 5
+#switch 1 and 3 = 1+1+0+4 = 6
+# switch 2 and 3 = 1+ 1 + 2+4 = 7 
+#switch 1, 2, 3 all on =1 + 1 + 2 + 4 = 8
+
+#if you need to add in a 4th switch it's just 8*switch[4] and so on and so forth
+
+###### Okay, back to the results #######
+
 #so what's actually happening in this model? 
 #basically, at each iteration, JAGS is "trying out" possible values for all the parameters - sometimes that means elevation is used to model occupancy, sometimes rainfall, sometimes both (and sometimes neither!). Each time it runs an iteration, it looks at the likelihood that the data came from a distribution that relies on those predictors. *IF* one model really is a better model, we would expect the data to have a much higher likelihood under that model - a much better "fit".
 # As a better model is "found", that combo of variables will be accepted more often than other combinations of our predictor variables. Then, after the model runs, we can ask "how many times was this model "accepted"?" 
