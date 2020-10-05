@@ -1,0 +1,562 @@
+---
+title: "Jags Error Messages"
+author: 
+  - name: "Heather Gaya"
+    email: "heather.e.gaya@gmail.com"
+date: "9/15/2020"
+output: 
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(runjags)
+runjags.options(inits.warning = F, rng.warning = F, silent.jags = T)
+```
+JAGS can produce all sorts of fun error messages! They can often seem confusing when first starting out, but with a little practice most of them *eventually* make sense. Key word most :) 
+
+If you have any others that you've come across and don't understand what they come from, let me know! 
+
+
+First, like all good examples, we need a model. Here's a simple occupancy model, that I am calling "modelstring.correct"
+```{r model}
+modelstring.correct = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+And here's the correct way to give JAGS some data and other information it needs
+
+```{r run}
+y <- read.csv("cawa_data_2017_occu.csv", row.names = 1) #grab data
+jags.data <- list(y=as.matrix(y), nSites=109, nOccasions=4)
+
+jags.inits <- function() {
+  list(psi=runif(1), p=runif(1), z=rep(1, 109))
+}
+
+jags.pars <- c("psi", "p", "sitesOccupied")
+
+library(runjags)
+jags.post.samples <- run.jags(model = modelstring.correct,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel")
+summary(jags.post.samples)
+```
+
+There are three types of errors you can get when working with JAGS - problems with the model itself, problems with the data/initial values/monitors that you give to to run the model, and problems with R. 
+
+The above model is written correctly. Given the right data and information, it will run happily without error. Let's see what happens when we break it in various ways: 
+
+# Model Writing Errors
+
+##  Unknown Function
+
+First, let's try to draw something from a distribution using the wrong symbol - a "<-" instead of a "~" 
+
+We'll change psi ~ dunif(0,1) to psi <- dunif(0,1). 
+```{r assignment, include = F}
+modelstring.sad1 = "
+model {
+
+# Prior for occupancy parameter
+psi <- dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+```{r error1, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad1,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+Obviously we know that the uniform distribution is allowed in JAGS so this error can be a head-scratcher for sure. But since we used the assignment symbol instead of the distribution symbol, JAGS is trying to find the function dunif() - which doesn't exist. This can also happen if you try to use an R command instead of a JAGS command, so make sure you know what language you're writing in! 
+
+## Syntax Error
+
+What about if we accidentally put in an extra symbol somewhere? Let's draw  y[i,j] ~ dbern(z[i]*p*) instead of  y[i,j] ~ dbern(z[i]*p)
+
+```{r extra asterisk, include = F}
+modelstring.sad3 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p*)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+```{r error3, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad3,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+Oh no, a syntax error! It can often help to ask your JAGS package to spit the model back out but with line numbers so that you know what "line 11" means. Remember that JAGS models don't count empty lines as true "lines" so if you're trying to count manually on a long model you can quickly lose track. 
+
+In the runjags package you can use the "failed.jags" command to look at the model numbers. There are similar commands in the other JAGS packages as well. Alternatively, you can open up your model in a .txt file and look at the lines that way.
+
+```{r modellines}
+failed.jags("model")
+```
+Now we can clearly see that line 11 is the line with the extra asterisk in it. 
+
+## Unmatched number of { and }
+What if we misplace a bracket? Let's delete one from our model 
+```{r missing bracket, include = F}
+modelstring.sad2 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+```{r error2, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad2,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+Luckily this error message is pretty obvious. 
+
+## Attempt to Redefine Node  
+One thing that JAGS does not like is attempts to define a parameter in two ways at the same time. 
+
+Let's say we accidentally model p two ways in the same model. This can happen if you're testing out your model and holding things constant and forget to fix the changes later. 
+
+We model p as p~dunif(0,1) and p <- .5
+```{r redefine, include = T}
+modelstring.sad4 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+
+p ~ dunif(0,1)
+p <- .5
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+```{r run redfine, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad4,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+Another way to get this same error is to put a constant prior inside a loop. For instance, in our model p is just one value. It doesn't matter what site you're at, p is p is p. But if we stick it inside a loop without indexing it, it tries to redraw p every time it goes through the loop. 
+```{r redefine2, include = T}
+modelstring.sad4.2 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability is now INSIDE the loop (bad)
+
+for(i in 1:nSites) {
+p ~ dunif(0,1)
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+```{r run redfine2, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad4.2,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+## Cannot Insert Node 
+
+Sometimes when switching back and forth between models, you might get the dimensions of an object wrong. Maybe in a previous model you modeled detection probability as a vector of probabilities, one for each time period in your survey. 
+
+So you accidentally have p ~ dunif(0,1) in one place and p[3] <- .34 in another place. 
+
+```{r insertnode model, include = T}
+modelstring.sad5 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+p[3] <- .34
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+This particular way of writing the model will give you an error saying that there is a dimension mismatch and you cannot insert the value into the node. 
+
+```{r insertnode, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad5,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+
+
+## Failed Check for Discrete-Valued Parameters in Distribution
+
+An error I recently encountered comes from mixing up the syntax of R and JAGS commands. In T, a random draw from a binomial distribution is done via rbinom(n,size,prob). But in JAGS, you use dbin(prob,size). If you do it backwards, JAGS yells. 
+
+Here's we'll incorrectly draw z[i] ~dbin(1,psi) instead of z[i] ~dbin(psi,1) (equivalent to dbern(psi))
+
+```{r discrete value, include = T}
+modelstring.sad6 = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~dbin(1,psi)
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+```{r discrete value run, error = T}
+jags.post.samples <- run.jags(model = modelstring.sad6,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+# Data Errors
+
+So let's say we get the correct model written out, but then we don't give JAGS the correct information to let it run. What happens? New errors! Here's the correct model for reference. 
+```{r model again }
+modelstring.correct = "
+model {
+
+# Prior for occupancy parameter
+psi ~ dunif(0,1)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+
+Let's start with my "favorite" error, the bane of many an R-users existence, the "parent node" problem.
+
+## Node Inconsistent with Parents 
+Let's say we run this model and we don't provide any initial values. Sometimes you can get away with this, because JAGS will try to choose reasonable starting values and it is *possible* that these values will work great. But more often that not, the starting values do not make any sense and JAGS is confused. 
+```{r parent, error = T}
+library(runjags)
+jags.post.samples <- run.jags(model = modelstring.correct,  
+                              data=jags.data, 
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel", silent.jags = F)
+```
+The first issue with data errors, at least in this particular R package, is that the errors are very long. This is because the model is fine and JAGS starts by compiling the model, so it runs through all that before it realizes something is wrong. 
+
+In the above, the exact error is "Error in node y[1,1] Node inconsistent with parents" 
+
+In normal human english, this means something like "the value for y[1,1] doesn't make any sense given the other data. Help?" 
+
+First step, we ask "well, okay, what *IS* y[1,1]?" 
+```{r y[1,1]}
+y[1,1]
+```
+
+Okay, great. The value is 1. In our model, we draw y[i,j] ~ dbern(z[i]*p). We just said y[1,1] = 1, which means logically z[1] HAS to equal 1. But we didn't tell JAGS that z[1] = 1, so it randomly said "Well, looks like z[i] can be 0 or 1, so let's set it to 0." But since a bernoulli with probability 0 cannot result in a result of 1, it throws an error. 
+
+An easy fix for this issue is to set initial values that make sense. In this case, we can start by just setting all the z's equal to 1. 
+
+```{r fix inits}
+jags.inits <- function() {
+  list(z=rep(1, 109))
+}
+jags.post.samples <- run.jags(model = modelstring.correct,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+In this case, finding a logical initial value is really easy. In some cases this can take a very long time to resolve. For many classes of models, people have come up with brilliant ways to skip this frustration. But for others... it's just a pain.
+
+This error can also happen if you provide an initial value that makes no sense. Like, p = 1.5 (in the model, we define p as a value between 0 and 1). 
+
+```{r bad parent, error = T}
+jags.inits <- function() {
+  list(z=rep(1, 109), p = 1.5)
+}
+jags.post.samples <- run.jags(model = modelstring.correct,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+Notice that the actual problem here is NOT y[1,1] - we know that if we removed our bad initial value for p that the model would run. We also know that p cannot be 1.5, it just isn't possible. I don't have a brilliant suggestion here, this particular error just takes time to unravel. The best solution is to follow the path from data to prior and make sure all the values are a) possible and b) reasonable. 
+
+## Cannot Set Value of Non-Variable Node
+Speaking of initial values, JAGS does not approve of setting values on things that do not come from distributions. So our variable "sitesOccupied", which is really just adding up all the sites where z = 1, cannot have its own initial values. Instead, we have to put the initial values on z. 
+```{r bad inits, error = T}
+jags.inits <- function() {
+  list(z=rep(1, 109), sitesOccupied = 10)
+}
+jags.post.samples <- run.jags(model = modelstring.correct,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+## Unknown Variable
+
+Sometimes, by which I mean very often, you might forget to give jags some data. 
+```{r no data, error = T}
+jags.inits <- function() {
+  list(z=rep(1, 109))
+}
+jags.data <- list(y=as.matrix(y), nOccasions=4)
+jags.post.samples <- run.jags(model = modelstring.correct,  data=jags.data,
+                              inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+In this case, when JAGS gets down to the part of the model that loops over all the sites, it doesn't know what "nSites" means unless we give it that data in the data argument OR we hardcode it into the model somewhere. 
+
+
+
+## Cannot Resolve Node and Cannot Evaluate Subset Expression for sitesOccupied
+For these errors, we have to make our model a little more complex. Let's model some site covariates. Now psi is no longer just one value - instead it might change based on some site characteristic, like rainfall. 
+
+```{r model again2}
+modelstring.correct2 = "
+model {
+
+# Priors for occupancy parameters
+psi.beta0 ~ dunif(-3,3)
+psi.beta1 ~ dunif(-3,3)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+logit(psi[i]) <- psi.beta0+psi.beta1*rainfall[i]
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+Importantly, the above model does not have any distribution for rainfall. It assumes we have data for all of our sites. But what if we have an NA in there? 
+
+```{r rainfall}
+rainfall = runif(109, 0, 10) #just making up some rainfall data
+rainfall[c(5,15,20)] <- NA #3 of them are now NA
+jags.data <- list(y=as.matrix(y), nSites=109, nOccasions=4, rainfall = rainfall)
+jags.inits <- function() {
+  list(z=rep(1, 109))
+}
+```
+```{r run rainfall, error = T}
+jags.post.samples <- run.jags(model = modelstring.correct2,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel", silent.jags = F)
+```
+
+So the error we get is "Cannot evaluate subset expression for sitesOccupied." That doesn't really make a lot of sense because we said sitesOccupied <- sum(z), which seems pretty straightforward. In this case, a *SECOND* error is actually lurking. If you ever get an error that you can't explain, try commenting out the part of the model with the error and see if it runs. It can really help narrow down the problem.
+
+Let's comment out sitesOccupied from the model:
+```{r model again3}
+modelstring.correct3 = "
+model {
+
+# Priors for occupancy parameters
+psi.beta0 ~ dunif(-3,3)
+psi.beta1 ~ dunif(-3,3)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+logit(psi[i]) <- psi.beta0+psi.beta1*rainfall[i]
+  # Latent presence/absence
+  z[i] ~ dbern(psi)   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+#sitesOccupied <- sum(z) 
+
+}
+"
+```
+```{r run rainfall2, error = T}
+jags.post.samples <- run.jags(model = modelstring.correct3,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel", silent.jags = F)
+```
+
+Ahh, there it is! The 'real' error in this case was "Unable to resolve the following parameters" which comes from rainfall having NA's and no information for JAGS about reasonable values to fill in for the NA's. 
+
+Note that if you actually have NA's you can either remove them from your data, or model them from a distribution bound by reasonable ranges of the covariate. This assumes that the distribution of the covariate in your data is the same as the distribution of the covariate at your study site or in your population, which is not always a fair assumption. So be careful out there... NA's are tricky buggers! 
+
+
+# Other Errors
+
+Do you have any other strange JAGS errors you've come across? Let me know! Hopefully this manual will evolve with time as new and exciting errors make their way across my R console :) 
+
+
+
+
+
