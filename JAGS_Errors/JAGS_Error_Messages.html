@@ -436,14 +436,14 @@ jags.post.samples &lt;- run.jags(model = modelstring.correct,
 ## Coda files loaded successfully
 ## Finished running the simulation</code></pre>
 <pre class="r"><code>summary(jags.post.samples)</code></pre>
-<pre><code>##                  Lower95     Median   Upper95       Mean         SD Mode
-## psi            0.0608721  0.1152455  0.179827  0.1180535 0.03101209   NA
-## p              0.6839600  0.8027145  0.905594  0.7980988 0.05827579   NA
-## sitesOccupied 12.0000000 12.0000000 12.000000 12.0361667 0.19798612   12
-##                      MCerr MC%ofSD SSeff         AC.10     psrf
-## psi           0.0004003644     1.3  6000 -0.0006754015 1.000059
-## p             0.0010348830     1.8  3171  0.0048325624 1.000522
-## sitesOccupied 0.0028225132     1.4  4920 -0.0034579542 1.000372</code></pre>
+<pre><code>##                  Lower95   Median   Upper95       Mean         SD Mode
+## psi            0.0590392  0.11439  0.177090  0.1168326 0.03083251   NA
+## p              0.6867690  0.80221  0.907372  0.7980830 0.05715070   NA
+## sitesOccupied 12.0000000 12.00000 12.000000 12.0345000 0.18969031   12
+##                      MCerr MC%ofSD SSeff       AC.10     psrf
+## psi           0.0003980459     1.3  6000 0.001290251 1.000232
+## p             0.0009781896     1.7  3413 0.015303696 1.000937
+## sitesOccupied 0.0026095527     1.4  5284 0.005361647 1.008288</code></pre>
 <p>There are three types of errors you can get when working with JAGS - problems with the model itself, problems with the data/initial values/monitors that you give to to run the model, and problems with R.</p>
 <p>The above model is written correctly. Given the right data and information, it will run happily without error. Let’s see what happens when we break it in various ways:</p>
 <div id="model-writing-errors" class="section level1">
@@ -728,7 +728,7 @@ jags.post.samples &lt;- run.jags(model = modelstring.correct,
 <pre><code>## Calling 3 simulations using the parallel method...
 ## Following the progress of chain 1 (the program will wait for all chains
 ## to finish before continuing):
-## Welcome to JAGS 4.3.0 on Mon Oct  5 17:56:31 2020
+## Welcome to JAGS 4.3.0 on Mon Oct  5 18:14:38 2020
 ## JAGS is free software and comes with ABSOLUTELY NO WARRANTY
 ## Loading module: basemod: ok
 ## Loading module: bugs: ok
@@ -773,7 +773,7 @@ jags.post.samples &lt;- run.jags(model = modelstring.correct,
 <pre><code>## Note: Either one or more simulation(s) failed, or there was an error in
 ## processing the results.  You may be able to retrieve any successful
 ## simulations using:
-## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/RtmpRcqTyX/runjagsfiles1491076f8f980&quot;,
+## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/Rtmp0w76Wi/runjagsfiles14be7616d9153&quot;,
 ## recover.chains=TRUE)
 ## See the help file for that function for possible options.
 ## To remove failed simulation folders use cleanup.jags() - this will be
@@ -912,7 +912,7 @@ jags.inits &lt;- function() {
 <pre><code>## Calling 3 simulations using the parallel method...
 ## Following the progress of chain 1 (the program will wait for all chains
 ## to finish before continuing):
-## Welcome to JAGS 4.3.0 on Mon Oct  5 17:56:34 2020
+## Welcome to JAGS 4.3.0 on Mon Oct  5 18:14:41 2020
 ## JAGS is free software and comes with ABSOLUTELY NO WARRANTY
 ## Loading module: basemod: ok
 ## Loading module: bugs: ok
@@ -956,7 +956,7 @@ jags.inits &lt;- function() {
 <pre><code>## Note: Either one or more simulation(s) failed, or there was an error in
 ## processing the results.  You may be able to retrieve any successful
 ## simulations using:
-## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/RtmpRcqTyX/runjagsfiles1491069606f89&quot;,
+## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/Rtmp0w76Wi/runjagsfiles14be790f9474&quot;,
 ## recover.chains=TRUE)
 ## See the help file for that function for possible options.
 ## To remove failed simulation folders use cleanup.jags() - this will be
@@ -995,7 +995,7 @@ logit(psi[i]) &lt;- psi.beta0+psi.beta1*rainfall[i]
 <pre><code>## Calling 3 simulations using the parallel method...
 ## Following the progress of chain 1 (the program will wait for all chains
 ## to finish before continuing):
-## Welcome to JAGS 4.3.0 on Mon Oct  5 17:56:34 2020
+## Welcome to JAGS 4.3.0 on Mon Oct  5 18:14:42 2020
 ## JAGS is free software and comes with ABSOLUTELY NO WARRANTY
 ## Loading module: basemod: ok
 ## Loading module: bugs: ok
@@ -1043,7 +1043,7 @@ logit(psi[i]) &lt;- psi.beta0+psi.beta1*rainfall[i]
 <pre><code>## Note: Either one or more simulation(s) failed, or there was an error in
 ## processing the results.  You may be able to retrieve any successful
 ## simulations using:
-## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/RtmpRcqTyX/runjagsfiles1491039025f00&quot;,
+## results.jags(&quot;/private/var/folders/v4/v904tsfx66zc2rwrthj56_y80000gn/T/Rtmp0w76Wi/runjagsfiles14be76c98f2c&quot;,
 ## recover.chains=TRUE)
 ## See the help file for that function for possible options.
 ## To remove failed simulation folders use cleanup.jags() - this will be

@@ -1,12 +1,11 @@
+
 ---
 title: "Jags Error Messages"
-author: 
-  - name: "Heather Gaya"
-    email: "heather.e.gaya@gmail.com"
-date: "9/15/2020"
-output: 
-  html_document:
-    toc: true
+author: Heather Gaya, heather.e.gaya@gmail.com
+date: "10/5/2020"
+output:
+  pdf_document:
+    toc: yes
 ---
 
 ```{r setup, include=FALSE}
