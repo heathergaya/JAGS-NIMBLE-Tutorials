@@ -4,9 +4,10 @@ title: "Jags Error Messages"
 author: Heather Gaya, heather.e.gaya@gmail.com
 date: "10/5/2020"
 output:
-  pdf_document:
-    toc: yes
+  pdf_document
 ---
+\tableofcontents
+\newpage
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
