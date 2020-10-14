@@ -416,7 +416,9 @@ jags.post.samples <- run.jags(model = modelstring.correct,
 
 In this case, finding a logical initial value is really easy. In some cases this can take a very long time to resolve. For many classes of models, people have come up with brilliant ways to skip this frustration. But for others... it's just a pain.
 
-This error can also happen if you provide an initial value that makes no sense. Like, p = 1.5 (in the model, we define p as a value between 0 and 1). 
+## Invalid Parent Values  
+Similar to the previous error, this happens if you provide an initial value that makes no sense. Like, p = 1.5 (in the model, we define p as a value between 0 and 1). 
+
 
 ```{r bad parent, error = T}
 jags.inits <- function() {
