@@ -1,0 +1,971 @@
+---
+title: "Intro to Bayesian N-Mixture Models (Closed Populations)"
+author: "Heather Gaya"
+date: "11/4/2020"
+output: pdf_document
+---
+\newcommand{\bs}{{\bm s}}
+\newcommand{\cS}{{\mathcal S}}
+\newcommand{\ds}{{\, \mathrm{d} \bm s}}
+\newcommand{\Bern}{{\mathrm{Bern}}}
+\newcommand{\Bin}{{\mathrm{Bin}}}
+\newcommand{\Po}{{\mathrm{Pois}}}
+\newcommand{\Gam}{{\mathrm{Gamma}}}
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width = 8, collapse = TRUE)
+library(coda)
+library(runjags)
+library(knitr)
+library(nimble)
+```
+N-mixture models are a flexible way to get abundance estimates from point counts, electrofishing, double observer data, etc. In this tutorial I will explain some basic N-mixture models and show you how to code and run the models in both JAGS and NIMBLE. I will discuss binomial, double observer, and removal sampling detection models. 
+
+I'm assuming for now that everyone has downloaded JAGS and NIMBLE and has them setup on their computers. Before you use NIMBLE make sure R, and Rtools or Xcode are updated on your computer (otherwise a weird "shared library" error can come up).  JAGS is downloadable here: <https://sourceforge.net/projects/mcmc-jags/> and NIMBLE can be found here: <https://r-nimble.org/download> 
+
+Please send any questions or suggestions to heather.e.gaya(at)gmail.com or find me on twitter: doofgradstudent
+
+\tableofcontents
+\newpage
+
+\section{Fake Scenarios}
+There's a bunch of ways you can collect data that yield counts of unmarked individuals at different sites. Maybe you're electrofishing and want to estimate the abundance of fish in a stream (removal sampling). Maybe you're doing point counts for birds. Maybe you're counting butterflies in different plots (double observer).
+
+All of these types of data have different underlying methods of detection, but they all have very similar data. The data is focused on the species rather than on the individuals themselves. 
+
+Let's walk through these three different examples. For these examples we're only going to discuss *closed* populations. 
+
+\subsection{Simple Counts - Bird Point Counts}
+
+There are a lot of ways to do point counts, but one possible method is counting the number of animals seen or heard in a given amount of time. Let's say we go out and look for white-throated sparrows at 20 sites. We visit each site 4 times and take some measurements of the vegetation at the sites we visit and how windy it was (which might affect detection). None of the birds are marked, so we don't know if the ones we see at one visit are the same birds that we see at a different visit. 
+
+Here's what our data might look like:
+
+```{r, echo = F}
+set.seed(20) 
+tree <- runif(30) #fake percent tree
+psi.0 <- .5
+psi.1 <- .6
+abund.bird <- rpois(30, exp(psi.0+psi.1*tree))
+wind <- runif(30*4, 0,15) # fake wind speeds
+beta0 <- 1
+beta1 <- .05
+detect <- rbinom(30*4, rep(abund.bird, each = 4), plogis(beta0-beta1*wind))
+detect <- matrix(detect, ncol = 4, byrow = T)
+wind <- matrix(wind, ncol = 4, byrow = 1)
+birds <- data.frame(Site = seq(1:30), Visit1 = detect[,1], Visit2 = detect[,2], Visit3 = detect[,3], Visit4 = detect[,4], Wind1 = wind[,1], Wind2 = wind[,2], Wind3 = wind[,3], Wind4 = wind[,4], PercentCover = tree)
+kable(birds, digits = 2, align = "c")
+```
+
+\subsection{Removal Sampling - Electrofishing}
+
+For our second example, let's imagine we're electrofishing. (I got to try electrofishing twice in Kansas (Konza Prairie, whoo!) and I was terrible at it. But anyway.) When you're electrofishing, you close off a section of a stream/river and shock the water to catch fish, going from one barrier to the other and placing all your captured fish in a bucket. After each pass, the fish *stay* in the bucket - they do not go back into the river. At the end of the survey you count how many fish are in each bucket. We might expect more fish in deeper parts of the stream, but it's also hard to detect fish in deeper water, so we might measure average stream depth at each site to give us an idea of how stream reaches differ. Here's what this type of data might look like:
+
+```{r, echo = F}
+depth <- runif(30, 1, 5) #fake stream depth
+psi.0 <- .5
+psi.1 <- .6
+abund.fish <- rpois(30, exp(psi.0+psi.1*depth))
+beta0 <- 0
+beta1 <- .3
+p1 <- plogis(beta0-beta1*depth)
+detect <- matrix(NA, ncol = 4, nrow = 30)
+for(i in 1:30){
+ detect[i,] <- rmultinom(1, abund.fish[i], c(p1[i], (1-p1[i])*p1[i], ((1-p1[i])^2)*p1[i],((1-p1[i])^3)*p1[i], (1-p1[i])^4))[1:4]
+}
+fish <- data.frame(Site = seq(1:30), pass1 = detect[,1],pass2 = detect[,2], pass3 = detect[,3], pass4 = detect[,4], StreamDepth = depth)
+kable(fish, digits = 2, align = "c")
+```
+
+\subsection{Dependent Double Observer}
+
+Double observer sampling can be used when you don't have the resources to do multiple passes of a survey or it would be difficult to use some other method of detection. This is a common method for aerial surveys (deer, waterfowl, etc) where multiple passes with a plane can be expensive. I recently read a study where someone used this for butterflies, so that's the example I'll use here.
+
+You can have dependent or independent observers, but in this case we have a dependent double observer example. The first person walks along, looks for butterflies, and records how many they see. The second person writes down all the animals the first person saw as well as any others they see. The final result is a count of butterflies seen by person 1 and 2 or butterflies seen only by person 2. Butterflies are more likely to be flying around when the temperature is warm and the ground cover is mostly forbs, so we'll also look at those two covariates. 
+
+This type of data looks like this:
+```{r, echo = F}
+flowers <- runif(30) #fake flower cover
+psi.0 <- .5
+psi.1 <- 2
+abund.b <- rpois(30, exp(psi.0+psi.1*flowers))
+beta0 <- 0
+beta0.b <- .2
+beta1 <- .1
+temp <- as.numeric(scale(rnorm(30, 65, 5)))
+p1 <- plogis(beta0+beta1*temp)
+p2 <- plogis(beta0.b+beta1*temp)
+detect <- matrix(NA, ncol = 2, nrow = 30)
+for(i in 1:30){
+ detect[i,] <- rmultinom(1, abund.b[i], c(p1[i], (1-p1[i])*p2[i], ((1-p1[i])*(1-p2[i]))))[1:2]
+}
+butterflies <- data.frame(Site = seq(1:30), BothDetect = detect[,1],Obs2Only = detect[,2],Flowers = flowers, Temperature = temp)
+kable(butterflies, digits = 2, align = "c")
+```
+
+\section{The Meat of a Closed N-Mixture Model}
+\subsection{State Process Model}
+
+At the core of an N-mixture model is the idea that there is some expected number of individual at a site. We call this expected number $\lambda$. This expected number is based on site covariates in the form of a linear equation. The actual number of individuals, $N$, is then drawn from a poisson distribution. In a perfect world, the expected and the actual numbers would be equal ($\lambda$ = $N$), but the real world has more variation than that. 
+
+Note that this is very similar to an occupancy model! In occupancy model our linear model helps predict the probability of occupancy rather than the mean abundance, but the idea is essentially the same. 
+
+In general, our N-mixture model looks like this:
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {x_{i1}} +
+    \beta_2 {x_{i2}} + \cdots \\
+    N_{i} \sim \mathrm{Poisson}(\lambda_{i})
+\end{gather*}    
+
+where $\lambda_{i}$ is the expected value of abundance at site $i$, $N_{i}$ is the realized value of abundance at site $i$ and $x_1$ and $ x_2$ are site covariates. Note that you can draw $N_i$ from other distributions, but I prefer the poisson. 
+
+So if we look at our sparrow point count example, our state model looks like this:
+
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {tree_{i}} \\
+    N_{i} \sim \mathrm{Poisson}(\lambda_{i})
+\end{gather*}    
+
+\subsection{Detection Models}
+
+The state process describes what's actually out there. How many birds are really at those sites we counted or how many fish were actually in the stream reach, etc. But obviously we don't know *exactly* how many there are or we wouldn't need fancy models! The detection model will depend on what type of sampling you're doing. 
+
+\subsubsection{Bird Point Counts - Binomial Detection}
+
+For our bird point counts, we can think of our detection probability as just being a proportion. There are some true number of birds out there $N_i$ and each time we only see $y_i$, where $y_i$ = $N_i$*$p$. We also know that it can be harder to detect birds on windy days, so we expect that our detection at each visit is related to wind and that each time we visit. Of course if we have more covariates or have reason to believe that probability of detection changes between sites we could model our system that way instead, but for now we'll keep it simple. 
+
+Note that we will use a logit transform to ensure that $p$ stays between 0 and 1. 
+
+\begin{gather*}
+p_{it} = \frac{\exp(\alpha_0 + \alpha_1{Wind_{it}})}{\exp(\alpha_0 + \alpha_1{Wind_{it}})+1}\\
+y_{it} \sim \Bin(N_{i}, p_{it})
+\end{gather*}    
+where $p_{it}$ is the probability of detection at site $i$ during visit $t$, $N_{i}$ is the realized value of abundance at site $i$, $y_{it}$ is the number of individuals observed at site $i$ at visit $t$ and $Wind_{it}$ is the wind speed during visit $t$ at site $i$. 
+
+
+\subsubsection{Electrofishing - Removal Sampling}
+
+Detection gets a little more interesting for our removal sampling example. Since we take fish out of the stream each pass, they aren't available to be captured in subsequent passes. So in the first pass, we might capture fish with probability $p$. But in the second pass, in order to capture a fish, it has to have not been captured previously. So our probability of capture in pass 2 is the probability of missing it the first time $1-p$ times the probability of detecting it the second time $p$. Likewise, to see it the third time we have to miss it twice $(1-p)*(1-p)$ and then detect it $p$. Finally, we have a probability of $(1-p)^4$ of never detecting a fish. However, we never get this data specifically, since if we don't detect it, we don't know it was there. 
+
+Again we will use a logit transform in our equation for $p$ to make sure detection probability is bound between 0 and 1.
+
+\begin{gather*}
+p_i = \frac{exp(\alpha_0 + \alpha_1{StreamDepth_{i}})}{exp(\alpha_0 + \alpha_1{StreamDepth_{i}}) + 1}\\
+\pi_{i1} = p_{i}\\
+\pi_{i2} = (1-p_i)(p_i)\\
+\pi_{i3} = (1-p_i)^{2}(p_i)\\
+\pi_{i4} = (1-p_i)^{3}(p_i)\\
+\pi_{i5} = (1-p_i)^{4}
+\end{gather*}   
+
+where $p_i$ is the probability of detecting a fish at site $i$, $\pi_{i1}$ to $\pi_{i4}$ are the probability of detecting a fish at site $i$ in pass 1 to 4 and $\pi_{i5}$ is the probability of never detecting a fish. 
+
+To model this type of probability, we can use a mulitnomial distribution. This is essentially a categorical distribution where the "categories" are the passes- pass 1, pass 2, pass 3, pass 4 or never detected. 
+
+But there's a catch. We don't know how many are in the "never detected" bin. We only have data on the fish we actually capture. So what do we do? 
+
+The secret is *conditional probability*. Instead of thinking about the probability of detecting or not detecting animals, we can think about the probability of detecting an animal in any particular pass *given* that the animal was caught during the survey. This eliminates the need for thinking about the "never detected" animals and lets us just focus on probability - which is much easier to work with! 
+
+The probability of an individual being detected during the survey is just the sum of all the probabilities of catching an animal in each pass. 
+
+For any given site:
+\begin{gather*}
+\pi_{detect} = \pi_{1}+\pi_{2}+\pi_{3}+\pi_{4}
+\end{gather*} 
+
+Alternatively, it is 1- the probability of never being detected. 
+\begin{gather*}
+\pi_{detect} = 1- \pi_{5}
+\end{gather*} 
+
+Importantly, because we are working with conditional probability, we aren't placing $N_i$ individuals into each bin. Instead we're placing $n_i$ - the number that were captured during the survey. How do we get $n_i$? With a binomial draw, with probability $\pi_{detect}$.
+
+\begin{gather*}
+n_i \sim \Bin(N_i, \pi_{detect})
+\end{gather*} 
+
+So now we can rethink our categories probabilities. The probability of being caught in pass 1 given that the individual was ever caught is just $\frac{\pi_{1}}{\pi_{detect}}$. Similarly, the probability for pass 2 becomes $\frac{\pi_{2}}{\pi_{detect}}$ and so on. 
+
+So our full detection model can now be written as:
+
+\begin{gather*}
+p_i = \frac{exp(\alpha_0 + \alpha_1{StreamDepth_{i}})}{exp(\alpha_0 + \alpha_1{StreamDepth_{i}}) + 1}\\
+\pi_{i1} = p_{i}\\
+\pi_{i2} = (1-p_i)(p_i)\\
+\pi_{i3} = (1-p_i)^{2}(p_i)\\
+\pi_{i4} = (1-p_i)^{3}(p_i)\\
+\pi_{i5} = (1-p_i)^{4}\\
+n_i \sim \Bin(N_i, (1-\pi_{i5}))
+y_{i1:4} \sim \mathrm{Multinomial}(n_i, \{\frac{\pi_{i1}}{1-\pi_{i5}}, \frac{\pi_{i2}}{1-\pi_{i5}},\frac{\pi_{i3}}{1-\pi_{i5}},\frac{\pi_{i4}}{1-\pi_{i5}}\})
+\end{gather*}   
+
+where $p_i$ is the probability of detecting a fish at site $i$, $\pi_{i1}$ to $\pi_{i4}$ are the probability of detecting a fish at site $i$ in pass 1 to 4, $\pi_{i5}$ is the probability of never detecting a fish, $y_{it}$ is the number of fish detected at site $i$ in pass $t$, $n_i$ is total number of fish detected at site $i$ and $N_i$ represents the realized abundance of fish at site $i$.
+
+This can take a little bit of time to wrap your head around! 
+
+
+\subsubsection{Butterflies - Dependent Double Observer}
+
+Double observer sampling uses some of the same logic as removal sampling but has fewer "categories" or multinomial bins. Let's say the first observer has detection probability $p_{i1}$ at site $i$ and the second observer has detection $p_{i2}$. Since the second observer sees everything the first person does (in practice this is done with verbal cues or physical cues), there are only three detection options. 
+
+If the first observer sees the individual:
+\begin{gather*}
+\pi_{i1} = p_{i1}\\
+\end{gather*}
+Note that it doesn't matter for the second observer saw it or not - if the first person saw it, they will tell the second observer. 
+
+If only the second observer sees an individual then we know that observer one also has to *not* see it. 
+\begin{gather*}
+\pi_{i2} = (1-p_{i1})*p_{i2}\\
+\end{gather*}
+And if the individual was never detected then both observers had to not see it:
+\begin{gather*}
+\pi_{i3} = (1-p_{i1})*(1-p_{i2})\\
+\end{gather*}
+
+However just like in removal sampling, we don't know how many individuals we didn't see! So we must return to conditional probability and using $n$ instead of $N$ in our multinomial. Once again I'm setting up the two detection probabilites as linear models on the logit scale to constrain them between 0 and 1.
+\begin{gather*}
+p_{i1} = \frac{exp(\alpha_{01} + \alpha_{11}{Temp{i}})}{exp(\alpha_{01} + \alpha_{11}{Temp{i}}) + 1}\\
+p_{i2} = \frac{exp(\alpha_{02} + \alpha_{12}{Temp{i}})}{exp(\alpha_{02} + \alpha_{12}{Temp{i}}) + 1}\\
+\pi_{i1} = p_{i1}\\
+\pi_{i2} = (1-p_{i1})*p_{i2}\\
+\pi_{i3} = (1-p_{i1})*(1-p_{i2})\\
+n_i \sim \Bin(N_i, (1-\pi_{i3}))
+y_{i1:2} \sim \mathrm{Multinomial}(n_i, \{\frac{\pi_{i1}}{1-\pi_{i3}}, \frac{\pi_{i2}}{1-\pi_{i3}}\})
+\end{gather*} 
+
+Note that the transition from this dependent observer model to the independent model is very simple - we would simply split the first $\pi$ into two based on if the second observer also saw the individual or not ($p_{i1}*(1-p_{i2})$ and $p_{i1}*p_{i2}$). 
+
+\section{Coding a Closed N-Mixture Model in JAGS}
+
+So now that we have the formulas for our models, coding is easy right? Ha ha ha. Over time I've found it actually *does* get more intuitive but when I first started out the math to code relationship made very little sense. So let's walk through it!
+
+\subsection{Bird Point Counts}
+
+As always, let's start with our easiest example - sparrows. First, let's code the state process part. 
+
+As a reminder, this was the relationship we described above:
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {tree_{i}} \\
+    N_{i} \sim \mathrm{Poisson}(\lambda_{i})
+\end{gather*}
+
+We know $\lambda$ and $N$ are going to vary with site, so immediately we know we need a for loop. Then we can stick the equation above into our code. Remember that "dpois" just mean "distribution - poisson"
+
+```{r, eval = F, echo = T}
+modelstring.birds = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*tree[i]
+  N[i] ~ dpois(lambda[i])
+}
+```
+
+Okay, awesome! We will supply the tree information as data to our model. But what about beta0 and beta1? We'll give them some nice vague priors.
+```{r, eval = F, echo = T}
+modelstring.birds = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*tree[i]
+  N[i] ~ dpois(lambda[i])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+```
+Side note: How do we choose priors? There's no real rule, but one way to consider is to think about what the numbers do in the equation. For instance, if tree cover is 0 then we're saying that $log(lambda) = beta0$. This means .05 $\leq$ $lambda$ $\leq$ 20.09. And if tree cover is 1 (100%), $log(lambda) = beta0 + beta1*1$, which means .01 $\leq$ $lambda$ $\leq$ 148.4. This is a pretty large range and quite likely overkill - we saw a maximum of 6 sparrows at any given plot! 
+
+Now we can add in the detection information, which we said followed a binomial draw. Since $p$ varies by site and visit, we know we'll need to put it inside two loops. 
+
+\begin{gather*}
+p_{it} = \frac{\exp(\alpha_0 + \alpha_1{Wind_{it}})}{\exp(\alpha_0 + \alpha_1{Wind_{it}})+1}\\
+y_{it} \sim \Bin(N_{i}, p_{it})
+\end{gather*}    
+
+```{r, eval = F, echo = T}
+modelstring.birds = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*tree[i]
+  N[i] ~ dpois(lambda[i])
+  
+  for (t in 1:n.visit){
+  logit(p[i,t]) <- alpha0 + alpha1*wind[i,t]
+  y[i,t] ~ dbin(p[i,t], N[i])
+  }
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+```
+
+And now we just need to put into some priors for alpha0 and alpha1 and we can start running our model!
+```{r, echo = T}
+modelstring.birds = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*tree[i]
+  N[i] ~ dpois(lambda[i])
+  
+  for (t in 1:n.visit){
+  logit(p[i,t]) <- alpha0 + alpha1*wind[i,t]
+  y[i,t] ~ dbin(p[i,t], N[i])
+  }
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}
+"
+```
+
+We have to give jags a list of parameters we care about, data, initial values and all that good stuff. You can scroll back up to the examples section to see what the data look like if you need a refresher. 
+
+```{r, echo = T}
+params.birds <- c("alpha0", "alpha1", "beta0", "beta1", "N")
+jd.birds <- list(y = as.matrix(birds[,c("Visit1", "Visit2", "Visit3", "Visit4")]),
+                 wind = as.matrix(birds[,c("Wind1", "Wind2", "Wind3", "Wind4")]),
+                 tree = birds[,"PercentCover"], 
+                 n.sites = 30,
+                 n.visit = 4)
+ji.birbs <- function(){list(
+  alpha0 = runif(1, 0, 1),
+                            alpha1= runif(1),
+                            beta0 = runif(1),
+                            beta1 = runif(1, -1, 1),
+  N = apply(jd.birds$y, 1, max)+2
+  )}
+#1, .05, .5, .6
+jags.birds <- run.jags(model = modelstring.birds, 
+                       inits = ji.birbs,
+                     monitor = params.birds, 
+                     data = jd.birds, n.chains = 3, burnin =  1000,
+                     sample = 4000, method = "parallel", silent.jags = T)
+```
+
+If you're struggling with initial values, providing different values of N is a good place to start. Above I gave N values as the maximum at each site plus 2, but you can provide any values you think might make sense. 
+
+Let's check our results.
+
+```{r, echo = T}
+head(summary(jags.birds))
+```
+
+Next a visual inspection of the first few parameters.
+```{r, echo = T}
+plot(jags.birds$mcmc[,c("alpha0", "alpha1", "beta0", "beta1", "N[1]"),])
+```
+
+Both the visual inspection and the psrf suggest convergence! Since I simulated this data, we can also compare our estimates to the true values. Remember that $N$ is the estimated abundance of the site, the beta values relate to covariates that influence abundance at a site and the alpha values tell you about detection. 
+
+```{r, echo = F}
+b <- data.frame(Simulation = c(1, .05, .5, .6, abund.bird), Mean = summary(jags.birds)[,4], LCI = summary(jags.birds)[,1], UCI = summary(jags.birds)[,3] )
+kable(b, digits = 2, align = "c")
+```
+
+In this case, our jags model did decently well but with all the variation in wind the model was a little with with our detection parameters (but still in the credible interval). 
+
+\subsection{Electrofishing}
+
+In our electrofishing example we only had one covariate - stream depth - but we thought it influenced both detection (harder to catch fishies in deep pools) and abundance (more fishies are found in deep pools). 
+
+Our state process model was:
+As a reminder, this was the relationship we described above:
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {depth_{i}} \\
+    N_{i} \sim \mathrm{Poisson}(\lambda_{i})
+\end{gather*}
+
+and our detection was modeled via:
+\begin{gather*}
+p_i = \frac{exp(\alpha_0 + \alpha_1{StreamDepth_{i}})}{exp(\alpha_0 + \alpha_1{StreamDepth_{i}}) + 1}\\
+\pi_{i1} = p_{i}\\
+\pi_{i2} = (1-p_i)(p_i)\\
+\pi_{i3} = (1-p_i)^{2}(p_i)\\
+\pi_{i4} = (1-p_i)^{3}(p_i)\\
+\pi_{i5} = (1-p_i)^{4}\\
+n_i \sim \Bin(N_i, (1-\pi_{i5}))
+y_{i1:4} \sim \mathrm{Multinomial}(n_i, \{\frac{\pi_{i1}}{1-\pi_{i5}}, \frac{\pi_{i2}}{1-\pi_{i5}},\frac{\pi_{i3}}{1-\pi_{i5}},\frac{\pi_{i4}}{1-\pi_{i5}}\})
+\end{gather*}   
+
+We know that $\lambda$ and $N$ will vary by site, as will $p$ and $\pi$, so in this case we'll only need one for loop. In JAGS you can use the pow() function to raise values to the power of another value. So $pow((1-p[i]), 4)$ = $(1-p[i])^4$.
+
+```{r, echo=T, eval = F}
+modelstring.fish = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*depth[i]
+  N[i] ~ dpois(lambda[i])
+
+  logit(p[i]) <- alpha0 + alpha1*depth[i]
+  pi[i,1] <- p[i]
+  pi[i,2] <- (1-p[i])*(p[i])
+  pi[i,3] <- pow((1-p[i]), 2)*(p[i])
+  pi[i,4] <- pow((1-p[i]), 3)*(p[i])
+  pi[i,5] <- pow((1-p[i]), 4)
+  n[i] ~ dbin((1-pi[i,5]), N[i])
+  y[i,1:4] ~dmulti(pi[i,1:4]/(1-pi[i,5]), n[i]))
+}
+```
+
+Now all that's left is to add priors and we can run the model!
+```{r, echo=T, eval = T}
+modelstring.fish = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*depth[i]
+  N[i] ~ dpois(lambda[i])
+
+  logit(p[i]) <- alpha0 + alpha1*depth[i]
+  pi[i,1] <- p[i]
+  pi[i,2] <- (1-p[i])*(p[i])
+  pi[i,3] <- pow((1-p[i]), 2)*(p[i])
+  pi[i,4] <- pow((1-p[i]), 3)*(p[i])
+  pi[i,5] <- pow((1-p[i]), 4)
+  n[i] ~ dbin((1-pi[i,5]), N[i])
+  y[i,1:4] ~dmulti(pi[i,1:4]/(1-pi[i,5]), n[i])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}
+"
+```
+
+Next we send the model to JAGS:
+```{r, echo = T}
+library(runjags)
+params.fish <- c("alpha0", "alpha1", "beta0", "beta1", "N")
+jd.fish <- list(y = as.matrix(fish[,c("pass1", "pass2", "pass3", "pass4")]),
+                 depth = fish[,"StreamDepth"],
+                 n.sites = 30,
+                n = apply(fish[,c("pass1", "pass2", "pass3", "pass4")], 1, sum))
+ji.fish <- function(){list(
+  alpha0 = runif(1, -1, 1),
+  alpha1= runif(1, -1, 0),
+  beta0 = runif(1),
+  beta1 = runif(1),
+  N = jd.fish$n+2
+)}
+
+jags.fish <- run.jags(model = modelstring.fish, 
+                       inits = ji.fish,
+                     monitor = params.fish, 
+                     data = jd.fish, n.chains = 3, burnin =  1000,
+                     sample = 2000, method = "parallel",
+                     silent.jags = T)
+```
+Notice that this time we also provided the model with $n$ as data. Remember to give initial values of N if you're having trouble getting your model to initialize. 
+
+Now let's check our output.
+```{r, echo = T}
+head(summary(jags.fish))
+```
+
+Hmm, it doesn't seem to have finished converging. Let's run it a little longer.
+
+```{r, echo = T}
+jags.fish <- extend.jags(jags.fish, sample = 5000, silent.jags = T)
+```
+
+Check convergence again. 
+```{r, echo = T}
+head(summary(jags.fish))
+```
+
+Looks like convergence has been reached according to the r-hat diagnostic (psrf), but let's do a visual inspection too. 
+```{r, echo = T}
+plot(jags.birds$mcmc[,c("alpha0", "alpha1", "beta0", "beta1", "N[1]"),])
+```
+
+Looks pretty good! 
+
+As before, we can compare with the simulated data set to see how well we estimated the parameters. Remember that $N$ is the estimated abundance of the site, the beta values relate to covariates that influence abundance at a site and the alpha values tell you about detection. 
+
+```{r, echo = F}
+f <- data.frame(Simulation = c(0, .3, .5, .6, abund.fish), Mean = summary(jags.fish)[,4], LCI = summary(jags.fish)[,1], UCI = summary(jags.fish)[,3] )
+kable(f, digits = 2, align = "c")
+```
+
+\subsubsection{Alternative Removal Model Specification}
+There are actually two other ways you can write the removal model that will also run in JAGS. 
+
+The first way is to think of each pass as a binomial draw of detection, with the "trial size" decreasing each time. 
+
+We could think of the four passes as:
+\begin{gather*}
+y_{i1} \sim \Bin(N_{i}, p_{i})
+y_{i2} \sim \Bin(N_{i}-y_{i1}, p_{i})
+y_{i3} \sim \Bin(N_{i}-y_{i1}-y_{i2}, p_{i})
+y_{i4} \sim \Bin(N_{i}-y_{i1}-y_{i2}-y_{i3}, p_{i})
+\end{gather*}
+
+This method works, but it doesn't mix as well in JAGS and I think it's less fun.
+
+But should you want some code for it, the model looks like this:
+```{r, eval = F}
+  modelstring.fish2 = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*depth[i]
+  N[i] ~ dpois(lambda[i])   
+  logit(p[i]) <- alpha0 + alpha1*depth[i]
+  
+  y[i,1] ~ dbin(p[i], N[i])
+  y[i,2] ~ dbin(p[i], N[i]-y[i,1])
+  y[i,3] ~ dbin(p[i], N[i]-y[i,1]-y[i,2])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}
+"
+```
+
+The other option only works if you draw $N_i$ from a poisson as we have in this tutorial. This method will mix a lot faster in JAGS, so I think it's kind of nifty. 
+
+It turns out that through some fun math, you can transform this:
+
+\begin{gather*}
+N_i \sim \mathrm{Poisson}(\lambda_{i})\\
+y_{i1} \sim \Bin(N_i, \pi_{i1})\\
+\pi_{i1} = p_{i}
+\end{gather*}
+
+Into:
+\begin{gather*}
+\mathrm{Poisson}(\lambda_{i}\*\pi_{i1})\\
+\pi_{i1} = p_{i}
+\end{gather*}
+
+I tried to think of a fun, non-confusing way to explain this, but it ended up being more confusing. It doesn't really matter *why* this works, but the point is we could alternatively write our JAGS model as:
+
+```{r, eval = F}
+modelstring.fish3 = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*depth[i]
+  logit(p[i]) <- alpha0 + alpha1*depth[i]
+  
+  pi[i,1] <- p[i]
+  pi[i,2] <- (1-p[i])*p[i]
+  pi[i,3] <- (1-p[i])^2*p[i]
+  y[i,1] ~ dpois(lambda[i]*pi[i,1])
+  y[i,2] ~ dpois(lambda[i]*pi[i,2])
+  y[i,3] ~ dpois(lambda[i]*pi[i,3])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}
+"
+```
+
+Anyway, just some options to consider!
+
+\subsection{Doubled Observed Butterflies}
+
+Time to code our butterfly model. As a refresher, we had modeled our butterflies with:
+
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {flower_{i}} \\
+N_{i} \sim \mathrm{Poisson}(\lambda_{i})\\
+p_{i1} = \frac{exp(\alpha_{01} + \alpha_{11}{Temp{i}})}{exp(\alpha_{01} + \alpha_{11}{Temp{i}}) + 1}\\
+p_{i2} = \frac{exp(\alpha_{02} + \alpha_{12}{Temp{i}})}{exp(\alpha_{02} + \alpha_{12}{Temp{i}}) + 1}\\
+\pi_{i1} = p_{i1}\\
+\pi_{i2} = (1-p_{i1})*p_{i2}\\
+\pi_{i3} = (1-p_{i1})*(1-p_{i2})\\
+n_i \sim \Bin(N_i, (1-\pi_{i3}))\\
+y_{i1:2} \sim \mathrm{Multinomial}(n_i, \{\frac{\pi_{i1}}{1-\pi_{i3}}, \frac{\pi_{i2}}{1-\pi_{i3}}\})
+\end{gather*} 
+
+This code is almost identical to the electrofishing example, though the calculations for the $\pi$ values are a little different. Note that we have no reason to believe that the relationship between detection and temperature is different between the observers, so the two linear equations for observer-specific detection will share a slope parameter.  
+
+```{r, echo=T, eval = T}
+modelstring.butterfly = "
+  model 
+{
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*flowers[i]
+  N[i] ~ dpois(lambda[i])
+
+  logit(p1[i]) <- alpha0.a + alpha1*Temp[i]
+  logit(p2[i]) <- alpha0.b + alpha1*Temp[i]
+  pi[i,1] <- p1[i]
+  pi[i,2] <- (1-p1[i])*(p2[i])
+  pi[i,3] <- (1-p1[i])*(1-p2[i])
+  n[i] ~ dbin((1-pi[i,3]), N[i])
+  y[i,1:2] ~dmulti(pi[i,1:2]/(1-pi[i,3]), n[i])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-4,4)
+alpha0.a ~ dunif(-2,2)
+alpha0.b ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}
+"
+```
+
+Time to send the info to JAGS. 
+```{r, echo = T}
+params.butterfly <- c("alpha0.a","alpha0.b", "alpha1", "beta0", "beta1", "N")
+jd.butterfly <- list(y = as.matrix(butterflies[,c("BothDetect", "Obs2Only")]),
+                 flowers = butterflies$Flowers,
+                 Temp = butterflies$Temperature,
+                 n.sites = 30,
+                n = apply(butterflies[,c("BothDetect", "Obs2Only")], 1, sum))
+ji.butterfly <- function(){list(
+  alpha0.a = runif(1),
+  alpha0.b = runif(1),
+  alpha1= runif(1),
+  beta0 = runif(1),
+  beta1 = runif(1, 1, 2),
+  N = abund.b+1
+)}
+
+
+jags.butterfly<- run.jags(model = modelstring.butterfly, 
+                       inits = ji.butterfly,
+                     monitor = params.butterfly, 
+                     data = jd.butterfly, n.chains = 3, burnin =  7000,
+                     sample = 20000, method = "parallel",
+                     silent.jags = T)
+```
+
+Check our output like always
+```{r, echo = T}
+head(summary(jags.butterfly))
+```
+
+And trace plots.
+
+```{r, echo = T}
+plot(jags.butterfly$mcmc[,c("alpha0.a","alpha0.b", "alpha1", "beta0", "beta1", "N[1]"),])
+```
+
+I find that this specific model really doesn't mix well unless you have a lot of sites, repeat site visits, or very few covariates on detection. But even without those things this model does a decent job. Let's compare to simulation. As with the other two models, $N$ is the estimated abundance of the site, the beta values relate to covariates that influence abundance at a site and the alpha values tell you about detection (alpha0.a is observer 1, alpha0.b is observer 2). 
+
+```{r, echo = F}
+butter <- data.frame(Simulation = c(0, .2, .1, .5, 2, abund.b), Mean = summary(jags.butterfly)[,4], LCI = summary(jags.butterfly)[,1], UCI = summary(jags.butterfly)[,3] )
+kable(butter, digits = 2, align = "c")
+```
+
+
+\section{Coding the Models in NIMBLE}
+
+Lucky for us, wwitching these models over to NIMBLE is pretty easy! 
+
+\subsection{Bird Point Counts in NIMBLE}
+
+For our sparrow model, we really only have to alter 3 lines of our code to make it run in JAGS. 
+```{r, echo = T}
+nimblebirds <- #no more modelstring
+  nimbleCode({  #this line is v. important
+    
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*tree[i]
+  N[i] ~ dpois(lambda[i])
+  
+  for (t in 1:n.visit){
+  logit(p[i,t]) <- alpha0 + alpha1*wind[i,t]
+  y[i,t] ~ dbin(p[i,t], N[i])
+  }
+}
+    
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+}) #close the brackets
+```
+
+Now we want to give the data, initials and parameters of interest to NIMBLE. NIMBLE likes you to split your data into constants (things that don't change) and data (things that *could* or do change). An easy rule of thumb is - if it comes from a distribution, it's data, otherwise put it in as a constant. Note that if it has NA's in it, it's also data. 
+
+The reason you have to make this split in NIMBLE but not in JAGS is that you could setup an entire model in NIMBLE with one set of data and then run it again with a different set of data without having to worry about recompiling! This isn't something I do frequently, but if you're interested, here's the NIMBLE help page on this topic: <https://r-nimble.org/html_manual/cha-building-models.html>
+
+```{r, echo = T}
+np.birds <- c("alpha0", "alpha1", "beta0", "beta1", "N")
+nd.birds <- list(y = as.matrix(birds[,c("Visit1", "Visit2", "Visit3", "Visit4")]),
+                 wind = as.matrix(birds[,c("Wind1", "Wind2", "Wind3", "Wind4")]),
+                 tree = birds[,"PercentCover"])
+nc.birds <- list(n.sites = 30,
+                 n.visit = 4)
+ni.birds <- list(
+  alpha0 = runif(1, 0, 1),
+  alpha1= runif(1),
+  beta0 = runif(1),
+  beta1 = runif(1, -1, 1),
+  N = apply(jd.birds$y, 1, max)+2
+  )
+```
+
+Alright, time to run! You can run code in NIMBLE multiple ways, so let's start with the "less customizable but easier" method.
+
+```{r,echo=T}
+library(nimble)
+library(coda)
+Birds.mod.nimble <- nimbleMCMC(code = nimblebirds, 
+                  constants = nc.birds, 
+                  data = nd.birds, inits = ni.birds, monitors = np.birds, 
+                  niter = 10000, thin = 1, nchains =3, 
+                  nburnin = 1000, samplesAsCodaMCMC = TRUE)
+```
+
+You could alternatively run NIMBLE in a lot of separate steps - useful for error checking, adjusting the MCMC, running the same model with different data, etc. 
+
+```{r, echo = T}
+prepbirds <- nimbleModel(code = nimblebirds, constants = nc.birds, 
+                           data = nd.birds, inits = ni.birds) 
+  prepbirds$initializeInfo()
+  mcmcbirds <- configureMCMC(prepbirds, monitors = np.birds, print = T )
+  birdsMCMC <- buildMCMC(mcmcbirds) #actually build the code for those samplers
+  Cmodel <- compileNimble(prepbirds) #compiling the model itself in C++; 
+  Compbirds <- compileNimble(birdsMCMC, project = prepbirds) # compile the samplers next 
+  Birds.mod.nimble <- runMCMC(Compbirds, niter = 10000, 
+                             thin = 1, nburnin = 1000, 
+                             nchains = 3,
+                             samplesAsCodaMCMC = TRUE)
+```
+
+
+Awesome, let's check the results. The results in NIMBLE can be processed through the coda package, which gives you two lists of results - mean and sd in the first and quantiles in the second list. 
+
+```{r, echo = T}
+summary(Birds.mod.nimble)$statistics[c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),]
+summary(Birds.mod.nimble)$quantiles[c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),]
+```
+To evaluate convergence, we have to ask the coda package for the gelman-rubin diagnostic. 
+
+```{r, echo = T}
+tail(gelman.diag(Birds.mod.nimble)$psrf)
+```
+
+And let's check a few plots as always. 
+
+```{r, echo = T}
+plot(Birds.mod.nimble[,c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),])
+```
+
+Looks like convergence is reached! 
+
+We can compare the results to the simulation and JAGS output, just for fun. Obviously we aren't expecting any difference between NIMBLE and JAGS, but just as proof:
+```{r, echo = F}
+b.n <- data.frame(Simulation = c(1, .05, .5, .6, abund.bird), JAGSMean = summary(jags.birds)[,4], JAGSLCI = summary(jags.birds)[,1], JAGSUCI = summary(jags.birds)[,3], NIMBLEMean = summary(Birds.mod.nimble)$statistics[c(31:34, 1:30),1 ], NIMBLELCI = summary(Birds.mod.nimble)$quantiles[c(31:34, 1:30),1 ], NIMBLEUCI = summary(Birds.mod.nimble)$quantiles[c(31:34, 1:30),5])
+kable(b.n, digits = 2, align = "c")
+```
+
+\subsection{Electofishing Removal Sampling in NIMBLE}
+As before, not much changes between JAGS and NIMBLE when we run our removal sampling model. The big difference is that in NIMBLE you can't ask it to calculate the conditional probabilities inside the "dmulti" function. Instead we have to make this calculation in a separate line and use the new variable ($pi.cond[i,1:4]$) inside the multinomial.
+
+```{r, echo  = T}
+nimblefish <- #no more modelstring
+  nimbleCode({  #this line is important
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*depth[i]
+  N[i] ~ dpois(lambda[i])
+
+  logit(p[i]) <- alpha0 + alpha1*depth[i]
+  pi[i,1] <- p[i]
+  pi[i,2] <- (1-p[i])*(p[i])
+  pi[i,3] <- pow((1-p[i]), 2)*(p[i])
+  pi[i,4] <- pow((1-p[i]), 3)*(p[i])
+  pi[i,5] <- pow((1-p[i]), 4)
+  n[i] ~ dbin((1-pi[i,5]), N[i])
+  pi.cond[i,1:4] <- pi[i,1:4]/(1-pi[i,5]) #this line has to be added
+  y[i,1:4] ~ dmulti(pi.cond[i,1:4], n[i])
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-2,2)
+alpha0 ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+})
+```
+
+Let's get our data in order to send to NIMBLE.
+
+```{r, echo = T}
+np.fish <- c("alpha0", "alpha1", "beta0", "beta1", "N")
+nd.fish <- list(y = as.matrix(fish[,c("pass1", "pass2", "pass3", "pass4")]),
+                 depth = fish[,"StreamDepth"],
+                n = apply(fish[,c("pass1", "pass2", "pass3", "pass4")], 1, sum))
+nc.fish <- list(n.sites = 30)
+ni.fish <- list(
+  alpha0 = runif(1, -1, 1),
+  alpha1= runif(1, -1, 0),
+  beta0 = runif(1),
+  beta1 = runif(1),
+  N = nd.fish$n+2
+)
+```
+
+Alright, time to run! 
+
+```{r,echo=T}
+Fish.mod.nimble <- nimbleMCMC(code = nimblefish, 
+                  constants = nc.fish, 
+                  data = nd.fish, inits = ni.fish, monitors = np.fish, 
+                  niter = 8000, thin = 1, nchains =3, 
+                  nburnin = 1000, samplesAsCodaMCMC = TRUE)
+```
+
+Check results. 
+```{r, echo = T}
+summary(Fish.mod.nimble)$statistics[c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),]
+summary(Fish.mod.nimble)$quantiles[c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),]
+```
+
+Got to check for convergence as always.
+```{r, echo = T}
+tail(gelman.diag(Fish.mod.nimble)$psrf)
+```
+
+Oh no, it didn't converge! Unlike in JAGS, you can't just "extend" a model that was run using the "nimbleMCMC" function. But luckily if we run our model the "long" way, we have that option! 
+
+First let's run the exact same thing that we did above, but the "long" way. We'll run it in parallel to allow for 3 chains to run at the same time (much faster).
+```{r, echo= T}
+library(parallel)
+cl <- makeCluster(3) 
+clusterExport(cl = cl, varlist = c("nc.fish", "nd.fish", "ni.fish", "np.fish", "nimblefish"))
+Fish.out <- clusterEvalQ(cl = cl,{
+  library(nimble)
+  library(coda)
+  #you're now in a totally different environment so have to load packages again
+  prepfish <- nimbleModel(code = nimblefish, constants = nc.fish, 
+                           data = nd.fish, inits = ni.fish) 
+  prepfish$initializeInfo()
+  mcmcfish <- configureMCMC(prepfish, monitors = np.fish, print = T )
+  fishMCMC <- buildMCMC(mcmcfish) #actually build the code for those samplers
+  Cmodel <- compileNimble(prepfish) #compiling the model itself in C++; 
+  Compfish <- compileNimble(fishMCMC, project = prepfish) # compile the samplers next 
+  Compfish$run(nburnin = 1000, niter = 8000) #if you run this in your console it will say "null". Don't worry, it's doing something.
+  return(as.mcmc(as.matrix(Compfish$mvSamples)))
+}) #this will take awhile and not produce any noticeable output.  
+Fish.mod.nimble <- mcmc.list(Fish.out)
+```
+
+Check our diagnostic as before:
+```{r, echo = T}
+tail(gelman.diag(Fish.mod.nimble)$psrf)
+```
+
+So now let's add more samples. Note that in NIMBLE you'll likely see higher sample numbers, but they'll run much faster than they do in JAGS. 
+
+```{r, echo = T}
+out2 <- clusterEvalQ(cl, {
+   Compfish$run(40000, reset = FALSE)
+  return(as.mcmc(as.matrix(Compfish$mvSamples)))
+})
+Fish.mod.nimble <- mcmc.list(out2)
+```
+
+Check diagnostic again:
+```{r, echo = T}
+tail(gelman.diag(Fish.mod.nimble)$psrf)
+```
+
+We could keep doing this as necessary until we are satisfied with convergence. Let's also look at the trace plots to see how the chains look. 
+
+```{r, echo = T}
+plot(Fish.mod.nimble[,c("N[1]", "alpha0", "alpha1", "beta0", "beta1"),])
+```
+
+Once we're satisfied, we can look at the results of our model! 
+
+```{r, echo = T}
+summary(Fish.mod.nimble)
+```
+
+\subsection{Butterfly Surveys (Double Observer) in NIMBLE}
+
+There really isn't a whole lot that has to change to run this in NIMBLE. Again, we will have to pre-calculate the multinomial probabilities, but that's about the only difference. 
+```{r, echo=T, eval = T}
+nimblebfly<- #no more modelstring
+  nimbleCode({  #this line is new
+for (i in 1:n.sites){ 
+  log(lambda[i]) <- beta0 + beta1*flowers[i]
+  N[i] ~ dpois(lambda[i])
+
+  logit(p1[i]) <- alpha0.a + alpha1*Temp[i]
+  logit(p2[i]) <- alpha0.b + alpha1*Temp[i]
+  pi[i,1] <- p1[i]
+  pi[i,2] <- (1-p1[i])*(p2[i])
+  pi[i,3] <- (1-p1[i])*(1-p2[i])
+  n[i] ~ dbin((1-pi[i,3]), N[i])
+  pi.cond[i,1:2] <- pi[i,1:2]/(1-pi[i,3]) #new
+  y[i,1:2] ~dmulti(pi.cond[i,1:2], n[i]) #this has to change
+}
+
+beta0 ~ dunif(-3,3)
+beta1 ~ dunif(-4,4)
+alpha0.a ~ dunif(-2,2)
+alpha0.b ~ dunif(-2,2)
+alpha1 ~ dunif(-2,2)
+})
+```
+
+Time to send the info to NIMBLE. 
+```{r, echo = T}
+np.butterfly <- c("alpha0.a","alpha0.b", "alpha1", "beta0", "beta1", "N")
+nd.butterfly <- list(y = as.matrix(butterflies[,c("BothDetect", "Obs2Only")]),
+                 flowers = butterflies$Flowers,
+                 Temp = butterflies$Temperature,
+                n = apply(butterflies[,c("BothDetect", "Obs2Only")], 1, sum))
+nc.butterfly <- list(n.sites = 30)
+ni.butterfly <- list(
+  alpha0.a = runif(1),
+  alpha0.b = runif(1),
+  alpha1= runif(1),
+  beta0 = runif(1),
+  beta1 = runif(1, 1, 2),
+  N = nd.butterfly$n+1
+)
+```
+
+Alright, time to run! 
+
+```{r,echo=T}
+Butterfly.mod.nimble <- nimbleMCMC(code = nimblebfly, 
+                  constants = nc.butterfly, 
+                  data = nd.butterfly, inits = ni.butterfly, 
+                  monitors = np.butterfly, 
+                  niter = 100000, thin = 1, nchains =3, 
+                  nburnin = 90000, samplesAsCodaMCMC = TRUE)
+```
+
+Got to check for convergence as always.
+```{r, echo = T}
+tail(gelman.diag(Butterfly.mod.nimble)$psrf)
+```
+And check our plots!
+
+```{r, echo = T}
+plot(Butterfly.mod.nimble[,c("N[1]", "alpha0.a","alpha0.b", "alpha1", "beta0", "beta1"),])
+```
+
+Similarly to our jags model, we can see it didn't really do the best job of mixing, but the estimates aren't too far off the truth!
+
+We can also look at our full results:
+```{r, echo = T}
+summary(Butterfly.mod.nimble)
+```
+
+And that's Closed Population N-Mixture Models! Things get a little more interesting with dynamic models, so stay tuned :) 
+
