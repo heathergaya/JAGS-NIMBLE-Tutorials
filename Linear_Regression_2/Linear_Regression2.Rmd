@@ -1,0 +1,670 @@
+---
+title: "Linear Regression Part 2"
+author: "Heather Gaya"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width = 8, collapse = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+```
+
+This tutorial aims to expand what we talked about in Part 1 about linear regression. Today we'll add in categorical variables and model selection. As before, I'll show you how to run it in both JAGS and NIMBLE and I'll go over how to graph the results with credible intervals! 
+
+I'm assuming for now that everyone has downloaded JAGS and NIMBLE and has them setup on their computers. Before you use NIMBLE make sure R, and Rtools or Xcode are updated on your computer (otherwise a weird "shared library" error can come up).  JAGS is downloadable here: <https://sourceforge.net/projects/mcmc-jags/> and NIMBLE can be found here: <https://r-nimble.org/download> 
+
+Please send any questions or suggestions to heather.e.gaya(at)gmail.com or find me on twitter: doofgradstudent
+
+\tableofcontents
+\newpage
+
+
+\section{A Fake Scenario}
+As we saw in Part 1, Joe has gone out in the world and collected 50 frogs. He recorded each frog's age (in days), weight (in g), left back leg length (cm), the distance the animal was from the road (m) and what species the frog is (A or B). His data looks like this (but with 50 rows): 
+```{r load data, include=FALSE}
+Frogs <- read.csv("Fakefrogs.csv")
+library(knitr)
+library(runjags)
+library(nimble)
+library(coda)
+```
+```{r show data, echo = F}
+kable(head(Frogs), digits =2, align = "c")
+```
+
+
+Previously, Joe was only interested in how weight was related to age, leg length and distance from the road, but now he wants to model the two species separately. 
+
+When we only used continuous variables, we could just multiply betas ($\beta$) by the variable itself to model the relationship. But "Species" isn't informative numerically - there's no order to Species A vs Species B - so we have to think about this a different way. 
+
+There are many options here for the actual equation, depending on what we think the relationship is with species - do we think the intercept is different? Maybe one frog grows faster than the other, so we would expect a difference in the relationship with age? 
+
+Before, we had: 
+\begin{equation*}
+\begin{split}
+E(weight) = \beta_0 + \beta_1A + \beta_2L + \beta_3D \\
+Actualweight \sim Normal(\mu = E(weight), \sigma= sd)
+\end{split}
+\end{equation*}
+
+where A was age, L was leg length and D was distance to road. 
+
+Let's imagine a model where just the intercepts are different. Maybe this means we think the average weight of species B is always going to be heavier, but it will still have the same relationships with the other variables. 
+
+Conceptually, we might think of our expected weight equation as:
+E(weight) <- interceptA*(1 if species A, 0 if species B) + interceptB*(1 if species B, 0 if species A) + age X something + leg X something2 + distance X something3.age*something + leg*something2 + distance*something3
+
+In more mathy format,
+\begin{equation*}
+\begin{split}
+E(weight) = \begin{cases} 
+\text{species = A} & \beta_0^A + \beta_1A + \beta_2L + \beta_3D \\
+\text{species = B} & \beta_0^B + \beta_1A + \beta_2L + \beta_3D 
+\end{cases} \\
+Actualweight \sim Normal(\mu = E(weight), \sigma= sd)
+\end{split}
+\end{equation*}
+
+However in JAGS (or NIMBLE) we can't use this "ifelse" type statement. So we have to resort to a trick called "nested indexing". 
+
+\section{A Quick Note on Nested Indexing}
+Nested indexing can be a little confusing at first glance, but it saves a ton of time and headache once you get used to the idea! We're used to thinking of variables as either one value (think, $\beta_1$) or a vector of lots of values (e.g. leg values of all frogs in our dataset) but variables can be all sorts of dimensions. 
+
+Let's say we have a variable $s$, a vector of length 50 that represents if the frog is species A or species B. 1's are species A and 2's are species B. Let's also say we have two intercept values, one for species A and the second for species B. 
+
+```{r nested indexing}
+(s <- as.numeric(Frogs$Species))
+fake.intercepts <- c(2, 5)
+```
+
+Normally in R, if we want the 5th individual's species, we would type s[5] and get out "1". And if we want the intercept for species A, we would type  fake.intercepts[1] and get out "2". So we can conveniently put these together to say "hey, what's the intercept value for individual 5?". This is the joy of nested indexing. 
+```{r nested 2}
+s[5] 
+fake.intercepts[1]  
+fake.intercepts[s[5]] # = fake.intercept[1]
+fake.intercepts[s[40]] # = fake.intercept[2]
+```
+
+
+\section{Writing Model 1 JAGS} 
+
+As before, we can save the model as a textstring in R to send to JAGS later. First, we start with the meat of the model - the equation we had up above (but now with nested indexing!). Also remember that JAGS requires the normal distribution be defined with mean and precision instead of standard deviation. 
+
+```{r JAGS mod 1, eval = F}
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3
+  weight[i] ~ dnorm(meanweight[i], prec)
+}
+```
+
+
+Now let's get some priors in there and convert between precision and standard deviation 
+
+```{r jags mod 2, eval = F}
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+```
+
+And finally we stick it all together into one model! 
+```{r JAGS mod}
+modelstring.Frogs1 = "
+  model 
+{
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3
+    weight[i] ~ dnorm(meanweight[i], prec)
+}
+
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+}
+" 
+```
+
+
+Time to send the model to JAGS. First we give the model parameters to monitor:
+```{r jags params}
+params <- c("beta0", "beta1", "beta2", "beta3","sd") 
+```
+
+And give JAGS the data we have on the frogs. We also need to add the new variable "s" that we created up above. 
+```{r JAGS data}
+data <- list(weight = Frogs$Weight, distance = Frogs$Dist, 
+             age = Frogs$Age, leg = Frogs$Leg,
+             n.frogs = 50, s = s)
+```
+
+
+Next initial values. For really simple models, you don't really have to provide these, since JAGS will try to pick its own. The big caveat is that sometimes JAGS picks terrible initial values and then throws weird errors, so that's something to be prepared for. Once you get into any kind of mixture models, I highly recommend using initial values. For now, we will skip them.
+
+Finally we run the model and check the summary statistics. 
+```{r jags run}
+library(runjags)
+Frog.mod1 <- run.jags(model = modelstring.Frogs1, 
+                     monitor = params, 
+                     data = data, n.chains = 3, 
+                     sample = 5000, method = "parallel")
+```
+```{r summary jags, eval = F}
+summary(Frog.mod1)
+```
+```{r summary jags pretty, echo = F}
+kable(as.data.frame(summary(Frog.mod1)), digits = 2, align = "c")
+```
+
+Looking good in terms of convergence, but let's do a visual inspection just for good measure. 
+
+```{r frog plot jags}
+plot(Frog.mod1)
+```
+
+Chains are mixing well and the autocorrelation drops off pretty quickly. Looks like our model has converged! Notice, however, that the CIs for beta0 are realllly wide - not very useful if this were real data and a real model! 
+
+
+\section {Model 1 in NIMBLE} 
+Running the model in NIMBLE is almost the same as running it in JAGS, except we can skip the precision part. 
+
+```{r NIMBLE mod}
+library(nimble)
+nimbleFrogs1 <-
+  nimbleCode({ #don't forget this part 
+  
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3
+  weight[i] ~ dnorm(meanweight[i], sd = sd )
+}
+
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+sd ~ dunif(0.0001, 100)
+})
+```
+
+
+As always, we need to define our params, data, constants and inits arguments. Don't forget the new variable "s" is now a new constant. 
+
+```{r nimble stuff}
+params <- c("beta0", "beta1", "beta2", "beta3","sd") 
+data <- list(weight = Frogs$Weight, distance = Frogs$Dist, 
+             age = Frogs$Age, leg = Frogs$Leg)
+constants <- list(n.frogs = 50, s = s)
+inits <- list(beta0 = runif(2, -10, 10), beta1 = runif(1,-10,10), beta2 = runif(1,-10,10), beta3 = runif(1,-10, 10), sd = runif(1, .001, 100))
+```
+
+
+Time for our 7 step process to run the model. Notice that this time we'll prepare for using model selection by enabling WAIC. We'll also want to check convergence as normal. I'll explain what WAIC does in the next section. 
+
+```{r run nimble 1}
+prepfrogs <- nimbleModel(code = nimbleFrogs1, constants = constants, 
+                         data = data, inits = inits) 
+prepfrogs$initializeInfo() #everything is good to go! 
+mcmcfrogs <- configureMCMC(prepfrogs, monitors = params, print = T )
+frogsMCMC <- buildMCMC(mcmcfrogs, enableWAIC = TRUE) # a change here to allow us to use WAIC
+Cmodel <- compileNimble(prepfrogs) #compiling the model itself in C++; 
+Compfrogs <- compileNimble(frogsMCMC, project = prepfrogs) # compile the samplers next 
+Frog.mod.nimble <- runMCMC(Compfrogs, niter = 30000, thin = 1, nchains =3, nburnin = 10000, samplesAsCodaMCMC = TRUE, WAIC = TRUE)
+```
+```{r nimble summary, eval = F}
+library(coda)
+summary(Frog.mod.nimble$samples)
+gelman.diag(Frog.mod.nimble$samples)
+```
+```{r nimble summary quiet, echo =F}
+kable(summary(Frog.mod.nimble$samples)[[1]], digits = 2, align = "c")
+kable(summary(Frog.mod.nimble$samples)[[2]], digits = 2, align = "c")
+
+```
+```{r gelman quiet, echo = F}
+gelman.diag(Frog.mod.nimble$samples)
+```
+
+Happy convergence! But per always, we should plot our chains just in case. 
+```{r plot nimble 1}
+plot(mcmc.list(Frog.mod.nimble$samples))
+```
+
+The results are essentially the same as we got from our JAGS output. Whooo! 
+
+
+\section{Model Selection: DIC} 
+
+So now we have our new model... but is it really any better than any other model we might try? This is where model selection comes in. There's no one way that's agreed upon for Bayesian model selection. DIC is convenient and already built into JAGS but there's not theoretical basis for why it works. WAIC is a more robust option than DIC, but requires slightly more calculation (unless you run NIMBLE, which has WAIC built in). Both options give fairly similar answers and are appropriate when the model is not a mixture model, so we're good to use them for our simple linear regressions. 
+
+But what are they? Gelman, Hwang, and Vehtari 2013 give a great explanation of these methods but I will paraphrase in a hopefully helpful way. First, let's talk about DIC since many people (currently) seem to use this if they do model selection for linear regression. 
+
+DIC is a "somewhat Bayesian version of AIC". The goal of DIC is similar to that of AIC - estimate the likelihood of that model and correct for the number of parameters. The model with the lowest DIC score is considered the "best" model OF THE MODELS WE TESTED. This is not a test for the "true model" only a test for the "best of the options available". DIC is calculated via:
+\begin{equation*}
+DIC = -2log(p(y|\theta_{bayes}))+ 2p_{DIC}
+\end{equation*}
+
+
+If we break this apart, we can see the similarities with AIC. Firstly, $p(y|\theta_{bayes})$ simply refers to the posterior estimate of $\theta$, AKA the fit of the model. How well does the model fit the data we gave it? Intuitively we have a sense that a better fit to the data makes a better model, so this part of the formula is logical. We then take the log of it and multiply it by -2 to make it similar to AIC.  The second half of the equation tries to correct for potential overfitting of data. In general, the more parameters we add, the better the model will seem to "fit" the data, but that doesn't mean it's going to be any good at predicting anything. We want to balance the fit with the data and the ability to predict points not in our dataset.  Similar to the $k$ in AIC, $2p_{DIC}$ refers to the effective number of parameters in the model. The more parameters we have, the higher the value for this half of the equation and the higher the value of DIC.  
+
+To extract DIC from our JAGS run, we simply run:
+```{r DIC 1}
+Dic_1 <- extract(Frog.mod1, what = "dic")
+Dic_1
+```
+
+We find that the mean deviance (the value of interest) is `r sum(Dic_1$deviance)`. Cool! But useless unless we run more models and compare values. 
+
+I'm not going to show you how to extract DIC from NIMBLE, since it automatically calculates WAIC, and WAIC is a generally more robust method of model selection. If you want my biased, unexpert opinion, WAIC is the better method overall. 
+
+\section{Model Selection: WAIC}
+
+WAIC is (shocker) also fairly similar but attempts to approximate cross-validation to help determine model fit. WAIC uses a similar measure of goodness-of-fit as DIC,  (log of the average posterior likelihood for each data point), but uses the posterior variance in log-likelihood, with larger variances resulting in harsher penalties. 
+
+If we want to calculate WAIC from NIMBLE, we simply have to enable it during the run commands and then extract it via:
+```{r WAIC frogs}
+Frog.mod.nimble$WAIC 
+```
+
+If we want to calculate WAIC in JAGS, we have to do a little bit more work. We're going to calculate the deviance of our points using, in this case, the log-normal PDF equation. 
+
+Wow that sounds scary! But it's really simple. In our model, we currently pull weight from a normal, with mean of "meanweight" and precision "prec". Now we're going to ask JAGS to give us the probability that our weight value (our data) really came from that same normal distribution we just pulled from. If we have a really good model, then the probability that we pulled from that distribution should be high, because, you know, *it came from* that distribution. But if our model is really terrible, then the deviance will be really high and the probability really low - in other words, the difference between our data and the "expected" value from the model will be very different.
+
+Here's what that all looks like in JAGS. Note that if we were modeling weight from something other than a normal, we'd have to use the logdensity.(whatever the distribution was) function instead of logdensity.norm. 
+
+```{r JAGS WAIC}
+modelstring.Frogs1 = "
+  model 
+{
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3
+    weight[i] ~ dnorm(meanweight[i], prec)
+    loglik[i] <- logdensity.norm(weight[i], meanweight[i], prec) #for WAIC calculation 
+}
+
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+}
+" 
+```
+```{r jags again}
+params <- c("beta0", "beta1", "beta2", "beta3","sd", "loglik") 
+data <- list(weight = Frogs$Weight, distance = Frogs$Dist, 
+             age = Frogs$Age, leg = Frogs$Leg,
+             n.frogs = 50, s = s)
+Frog.mod1 <- run.jags(model = modelstring.Frogs1, 
+                     monitor = params, 
+                     data = data, n.chains = 3, 
+                     sample = 5000, method = "parallel")
+```
+
+We can then calculate WAIC by hand using the code below. First we find all the output that relates to "loglik" (in this case, there are 50). Then we put those together as a matrix, find the mean and variance log-likelihood for each element (each data point) and then stick that into the WAIC equation.  
+
+```{r WAIC calc}
+vars <- grep("loglik", colnames(Frog.mod1$mcmc[[1]])) #find the output that relates to loglik
+like <- as.matrix(Frog.mod1$mcmc[,vars,]) 
+fbar <- colMeans(like) #mean log-likelihood 
+Pw <- sum(apply(like,2,var)) #mean variance in log-likelihood 
+WAIC<- -2*sum(fbar)+2*Pw
+WAIC
+```
+
+
+We aren't going to get the same value from our hand calculation as from NIMBLE (`r Frog.mod.nimble$WAIC`) because of a slight difference in how NIMBLE calculates WAIC, but the difference is not very important. The main thing is that we compare WAIC values that have been calculated the same way - either by hand or via NIMBLE. 
+
+Of course, the output of DIC or WAIC is not particularly meaningful on its own. It is only meaningful in comparison to other DIC or WAIC values for models run with the same data. So let's run some other models!
+
+
+\section{Models 2 and 3 in JAGS} 
+Returning to our models, let's test a model where one frog species grows faster than the other. Let's say we expect a difference in the relationship with age, but no difference in the intercept. 
+
+```{r jags mod waic}
+modelstring.Frogs2 = "
+  model 
+{
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0 + age[i]*beta1[s[i]] + leg[i]*beta2 + distance[i]
+  #note that the only thing that changes is the indexing of beta0 and beta1
+  weight[i] ~ dnorm(meanweight[i], prec)
+  loglik[i] <- logdensity.norm(weight[i], meanweight[i], prec)
+}
+
+#but now beta0 is only one value and  beta1 can be two different values
+beta0 ~ dunif(-50,50) 
+beta1[1] ~ dunif(-50,50)
+beta1[2] ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+
+
+#I like to convert precision to standard deviation because it confuses me otherwise. 
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+}
+" 
+```
+
+
+Now let's run the model through JAGS and see what we get. 
+
+```{r jags run 2}
+Frog.mod2 <- run.jags(model = modelstring.Frogs2, 
+                      monitor = params,
+                      data = data, n.chains = 3, 
+                      sample = 5000, method = "parallel")
+```
+```{r summary run 2, eval = F}
+head(summary(Frog.mod2), n = 5)
+```
+```{r summary jags 2 pretty, echo = F}
+kable(head(as.data.frame(summary(Frog.mod2)), n = 5), digits = 2, align = "c")
+```
+
+
+Looks like our model converged. We would also want to graph it like always to double check (not shown). 
+
+Let's extract our WAIC and DIC values and see how it compares to model 1. In real life, we'd only use one of these metrics, not both
+```{r jags dic and waic 2}
+Dic_2 <- extract(Frog.mod2, what = "dic")
+Dic_2 
+vars2 <- grep("loglik", colnames(Frog.mod2$mcmc[[1]])) #find the output that relates to loglik
+like2 <- as.matrix(Frog.mod2$mcmc[,vars2,]) 
+fbar2 <- colMeans(like2) #mean log-likelihood 
+Pw2 <- sum(apply(like2,2,var)) #mean variance in log-likelihood 
+WAIC2<- -2*sum(fbar2)+2*Pw2
+WAIC2
+```
+
+To compare with our previous model:
+```{r compare models 1}
+Dic_1 
+Dic_2 #bigger aka worse
+WAIC
+WAIC2 #bigger, aka not better 
+```
+
+Seems that this model is slightly worse than model 1. Let's test one more model for funsies. Maybe Joe thinks about his frogs and again and thinks that maybe weight is only related to age, but he still suspects there's a different equation (both intercept and slope) for both species.
+
+
+```{r frogs 3}
+modelstring.Frogs3 = "
+  model 
+{
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1[s[i]]
+  #got to reindex everything 
+  weight[i] ~ dnorm(meanweight[i], prec)
+  loglik[i] <- logdensity.norm(weight[i], meanweight[i], prec)
+}
+
+#adjust priors to match
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1[1] ~ dunif(-50,50)
+beta1[2] ~ dunif(-50,50)
+
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+}
+" 
+```
+
+Per usual, we adjust the parameters to monitor, data and initial values, then send it all to JAGS.
+
+```{r frogs3}
+params3 <- c("beta0", "beta1","sd", "loglik") 
+data3 <- list(weight = Frogs$Weight, 
+             age = Frogs$Age, n.frogs = 50, s = s)
+inits3 <- function(){list(beta0 = runif(2, -10, 10), beta1 = runif(2,-10,10))}
+Frog.mod3 <- run.jags(model = modelstring.Frogs3, 
+                      monitor = params3, inits = inits3,
+                      data = data3, n.chains = 3, 
+                      sample = 10000, method = "parallel")
+```
+```{r not pretty table, eval = F}
+head(summary(Frog.mod3), n = 4)
+```
+```{r pretty, echo=F}
+kable(head(as.data.frame(summary(Frog.mod3)), n = 4), digits = 2, align = "c")
+```
+
+Next we can grab our DIC and WAIC values:
+
+```{r final model DIC and WAIC}
+Dic_3 <- extract(Frog.mod3, what = "dic")
+
+vars3 <- grep("loglik", colnames(Frog.mod3$mcmc[[1]])) #find the output that relates to loglik
+like3 <- as.matrix(Frog.mod3$mcmc[,vars3,]) 
+fbar3 <- colMeans(like3) #mean log-likelihood 
+Pw3 <- sum(apply(like3,2,var)) #mean variance in log-likelihood 
+WAIC3<- -2*sum(fbar3)+2*Pw3
+```
+
+Let's make a table to compare all the results:
+```{r tables, eval = F}
+data.frame(Mods = 1:3, DICS = c(sum(Dic_1$deviance), sum(Dic_2$deviance), sum(Dic_3$deviance)), WAICS = c(WAIC, WAIC2, WAIC3))
+```
+```{r pretty out, echo = F}
+kable(data.frame(Mods = 1:3, DICS = c(sum(Dic_1$deviance), sum(Dic_2$deviance), sum(Dic_3$deviance)), WAICS = c(WAIC, WAIC2, WAIC3)), digits = 2, align = "c")
+```
+
+
+Okay, that model was a little worse than model 1! But remember that DIC and WAIC only tell you about models you've tested - in fact, the true model I used to create this data didn't use any of these models. So take all your model outputs with a grain of salt. 
+
+\section{Models 2 and 3 in NIMBLE} 
+Running the output from NIMBLE would be redundant, but here's those same models as above but in NIMBLE. Notice that basically nothing changes - the main differences are just in the way the models are sent to their various programs and the use of sd instead of precision. 
+
+```{r nimble 2}
+nimbleFrogs2 <-
+  nimbleCode({ #don't forget this part 
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0 + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3[s[i]]
+  #note that the only thing that changes is the indexing of beta0 and beta3
+  weight[i] ~ dnorm(meanweight[i], sd = sd)
+}
+
+#but now beta0 is only one value and  beta3 can be two different values
+beta0 ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3[1] ~ dunif(-50,50)
+beta3[2] ~ dunif(-50,50)
+
+sd ~ dunif(0.0001, 100)
+})
+```
+```{r nimble 4}
+nimble.Frogs3 <- 
+  nimbleCode({
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1[s[i]]
+  #got to reindex everything 
+  weight[i] ~ dnorm(meanweight[i], sd = sd)
+}
+
+#adjust priors to match
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1[1] ~ dunif(-50,50)
+beta1[2] ~ dunif(-50,50)
+
+sd ~ dunif(0.0001, 100)
+})
+```
+
+\section{Graphing the Output - Option 1}
+
+I, for one, am fairly lazy. Especially when it comes to math. If a program can do the work for me, I'm happy to let it do it! So for graphing output where multiple variables have credible intervals, I like to have JAGS (or NIMBLE) do the work for me.
+
+We can add a few lines to our code to get some nice point estimates at equally spaced points along the line we want to graph. Let's make a graph showing the relationship between expected weight and distance to road. 
+
+First, we add some new variables into our model that represent the predicted weights for species A and species B at different distances along the road. We'll hold the other variables constant at their mean values. 
+
+```{r graphy 1}
+modelstring.Frogs2graph = "
+model 
+{
+for (i in 1:n.frogs){ 
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1 + leg[i]*beta2 + distance[i]*beta3
+    weight[i] ~ dnorm(meanweight[i], prec)
+}
+
+beta0[1] ~ dunif(-50,50) 
+beta0[2] ~ dunif(-50,50) 
+beta1 ~ dunif(-50,50)
+beta2 ~ dunif(-50,50)
+beta3 ~ dunif(-50,50)
+
+prec <- 1/(sd *sd)
+sd ~ dunif(0.0001, 100)
+
+#Let's graph distances from 0 to 200 m from the road (reasonable, given our data ranges from 1.7 to 198)
+
+for (k in 1:201 ){ #can't iterate starting at 0, so we'll just use k-1 in our equation and start at 1 instead 
+
+  graph_w1[k] <- beta0[1] + 392*beta1 + 4*beta2 + (k-1)*beta3 #species 1
+  graph_w2[k] <- beta0[2] + 392*beta1 + 4*beta2 + (k-1)*beta3 #species 2
+}
+}
+" 
+```
+
+Now we'll want to monitor these new variables graphw1 and graphw2. 
+
+```{r params2}
+params2 <- c("beta0", "beta1", "beta2", "beta3","sd", "graph_w1", "graph_w2") 
+Frog.mod2graph <- run.jags(model = modelstring.Frogs2graph, 
+                      monitor = params2, 
+                      data = data, n.chains = 3, 
+                      sample = 5000, method = "parallel")
+```
+
+This will produce 402 more nodes, so I'm not going to look at my output this time. We already know the model should converge at this point since we haven't added any new stochastic information to the model, so we don't have to worry about convergence as long as we run the same number of chains as before.  Instead, we extract the means and CI's from the output without looking at them and throw them into a nice dataframe for ggplot to deal with. (If you want the base R graph, it's available in the R code, but I'll skip it for now) 
+
+```{r graphy dataframe}
+res <- summary(Frog.mod2graph)
+nodes <- c(grep("graph_w1", rownames(res)),
+           grep("graph_w2", rownames(res)))
+graphme <- data.frame(low = res[nodes,1], upper  = res[nodes,3], 
+                      mean = res[nodes,4], Species = rep(c("A", "B"), each = 201), 
+                      dist = c(0:200, 0:200))
+```
+
+And then we throw it into ggplot! Obviously you can customize your graph however, but here's the basic idea. 
+```{r ggplot1}
+library(ggplot2)
+ggplot(data = graphme, aes(x = dist, group = Species, col = Species, fill = Species))+
+  geom_smooth(aes(y = mean, ymin = low, ymax = upper), stat = "Identity")+
+  labs(x = "Distance to Road (m)", y = "Predicted Frog Weight (g)")+
+  ylim(0,70)+
+  theme_minimal(base_size = 18)+
+  theme(legend.position = "bottom",
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        strip.background =element_blank())
+```
+
+
+Tragically not the most interesting of graphs. But yay! Now you can graph output, perform model selection and write linear regression with categorical variables (hopefully).  The same exact procedure can be done in NIMBLE - just extract the values from the mcmc chains and send them to ggplot! 
+
+\section{Graphing the Output - Option 2}
+
+If you don't feel like re-running your model, here's an alternative option to getting that same beautiful output. 
+
+Let's graph model 3, even though it wasn't the best model, just for some variety. As a reminder, here's the relationship we modeled:
+
+```{r example, eval = F}
+  meanweight[i] <- beta0[s[i]] + age[i]*beta1[s[i]]
+```
+First, we're going to grab the values of beta0 and beta1 from each iteration of our model run. We'll grab the last 1001 iterations so that we know our results are reliable and the chains will have mixed well. We're just grabbing from the first chain here, but you can grab from whatever combo of chains you want. 
+
+```{r coef post}
+coef.post <- as.matrix(Frog.mod3$mcmc[[1]][9000:10000,c("beta0[1]","beta1[1]","beta0[2]","beta1[2]")])
+```
+
+Next we grab a few model iterations (in this case 100, but you can take however many you want), and make a matrix of the predicted weight values for each species. Note that this is using the betas from each iteration instead of them mean betas from all the iterations. We'll also need to predict over a range of ages we're interested in. Our data spans frogs ages 24 to 773 days, so we'll also graph that range as well. 
+
+```{r continued}
+n.iter <- nrow(coef.post)
+ages <- seq(24, 773, by = 10)
+coef.pred1 <- matrix(NA, nrow=n.iter, ncol=length(ages))
+coef.pred2 <- matrix(NA, nrow=n.iter, ncol=length(ages))
+for(i in 1:n.iter) {
+ coef.pred1[i,] <- coef.post[i,"beta0[1]"] + ages*coef.post[i,"beta1[1]"]
+ coef.pred2[i,] <- coef.post[i,"beta0[2]"] + ages*coef.post[i,"beta1[2]"]
+}
+```
+
+Each column is now the expected weight for a frog of that age, with coef.pred1 representing species 1 and coef.pred2 representing species 2. 
+
+We can now graph our results in ggplot or base R, whichever we prefer. Here's a way to do it in base R. 
+
+```{r base graph}
+par(mfrow = c(1,2))
+plot(ages, coef.pred1[1,], type = 'l', xlab = "Age (Days)",
+     ylab = "Predicted Frog Weight", ylim = c(0,100), 
+     col="white", main = "Species A")
+for(i in 1:n.iter){
+  lines(ages, coef.pred1[i,],col=grey(.8))
+}
+plot(ages, coef.pred2[1,], type = 'l', xlab = "Age (Days)", 
+     ylab = "Predicted Frog Weight", ylim = c(0,100), 
+     col="white", main = "Species B")
+for(i in 1:n.iter){
+  lines(ages, coef.pred2[i,],col=grey(.8))
+}
+```
+To get the CI lines, we can calculate them from our prediction objects, then plot:
+
+```{r calcs}
+post.mean.1 <- colMeans(coef.pred1)
+post.lower1 <- apply(coef.pred1, 2, quantile, prob=0.025)
+post.upper1 <- apply(coef.pred1, 2, quantile, prob=0.975)
+post.mean.2 <- colMeans(coef.pred2)
+post.lower2 <- apply(coef.pred2, 2, quantile, prob=0.025)
+post.upper2 <- apply(coef.pred2, 2, quantile, prob=0.975)
+```
+
+```{r last plot}
+par(mfrow = c(1,2)) #splits the plot into two plots
+plot(ages, coef.pred1[1,], type = 'l', xlab = "Age (Days)", 
+     ylab = "Predicted Frog Weight", ylim = c(0,100), 
+     col="white", main = "Species A")
+for(i in 1:n.iter){
+  lines(ages, coef.pred1[i,],col=grey(.8))
+}
+lines(ages, post.mean.1,col="blue", type = 'l')
+lines(ages, post.lower1, col="blue", type = 'l', lty = 2)
+lines(ages, post.upper1, col="blue", type = 'l', lty = 2)
+
+plot(ages, coef.pred2[1,], type = 'l', xlab = "Age (Days)", 
+     ylab = "Predicted Frog Weight", ylim = c(0,100), 
+     col="white", main = "Species B")
+for(i in 1:n.iter){
+  lines(ages, coef.pred2[i,],col=grey(.8))
+}
+lines(ages, post.mean.2,col="blue", type = 'l')
+lines(ages, post.lower2, col="blue", type = 'l', lty = 2)
+lines(ages, post.upper2, col="blue", type = 'l', lty = 2)
+
+```
+
+Whoo! Fancy graphs! 
+

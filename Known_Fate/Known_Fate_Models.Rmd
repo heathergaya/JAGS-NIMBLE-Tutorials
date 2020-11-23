@@ -1,0 +1,979 @@
+---
+title: "Known Fate Models With Model Selection"
+author: "Heather Gaya"
+date: "11/23/2020"
+output: pdf_document
+---
+\newcommand{\bs}{{\bm s}}
+\newcommand{\cS}{{\mathcal S}}
+\newcommand{\ds}{{\, \mathrm{d} \bm s}}
+\newcommand{\Bern}{{\mathrm{Bern}}}
+\newcommand{\Bin}{{\mathrm{Bin}}}
+\newcommand{\Po}{{\mathrm{Pois}}}
+\newcommand{\Gam}{{\mathrm{Gamma}}}
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width = 12, collapse = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80), tidy=TRUE)
+library(coda)
+library(runjags)
+library(knitr)
+library(nimble)
+library(ggplot2)
+library(tidyr)
+```
+
+I've recently been helping a friend work on a known-fate model for her dissertation and I figured that other people could benefit from what we've learned during this process! I'd never actually run a Bayesian known-fate model until a few weeks ago so I was pleasantly surprised to learn they're pretty easy but surprisingly powerful! 
+
+In this tutorial I'll show you how to run a known-fate model to estimate feral pig survival in JAGS and NIMBLE, using WAIC to choose the best covariate combination. The dataset itself is fake, but based off of some real data. I'll also show you how to graph the resulting survival curves! 
+
+As always, I'm assuming that everyone has downloaded JAGS and NIMBLE and has them setup on their computers. Before you use NIMBLE make sure R, and Rtools or Xcode are updated on your computer (otherwise a weird "shared library" error can come up).  JAGS is downloadable here: <https://sourceforge.net/projects/mcmc-jags/> and NIMBLE can be found here: <https://r-nimble.org/download> 
+
+Please send any questions or suggestions to heather.e.gaya(at)gmail.com or find me on twitter: doofgradstudent
+
+\tableofcontents
+\newpage
+
+\section{A Scenario}
+
+```{r fake data, include = F}
+#making up some data that roughly resembles the true data
+set.seed(20)
+Sow = sample(1:24, 100, replace = T)
+Sow_mass = rnorm(24, 982, 100)
+sexF = rbinom(100, 1, .4)
+years = c(2017,2019,2018,2019,
+          2018,2018,2017,2018,
+          2017,2017,2018,2019,
+          2017,2019,2018,2019,
+          2018,2018,2017,2018,
+          2017,2017,2018,2019)
+Ind.mass = rnorm(100, 300, 50)
+In.Date = c("2017-09-27", "2019-12-25", "2018-10-01", "2019-04-09",
+            "2018-05-03", "2018-05-20", "2017-08-01", "2018-09-15",
+            "2017-04-20", "2017-06-03", "2018-01-04", "2019-07-18",
+            "2017-02-27", "2019-12-25", "2018-10-21", "2019-02-09",
+            "2018-03-03", "2018-02-20", "2017-09-12", "2018-02-15",
+            "2017-01-20", "2017-08-03", "2018-05-04", "2019-04-18")
+col = sample(c("spotted", "notspotted"), 100, replace = T)
+fake.data = data.frame(ID = NA, Sow= Sow, Sow_mass = Sow_mass[Sow], sex = sexF, color = col, year = years[Sow], mass = Ind.mass, In.Date = In.Date[Sow], Out.Date = NA)
+fake.data <- fake.data[order(fake.data$In.Date, fake.data$Sow),]
+fake.data$ID = 1:100
+
+##make up some fake survival relationships 
+ran_sow <- runif(24, -1, 7)
+surv.prob <- matrix(NA, nrow = 100, ncol = 42)
+for(t in 2:42){
+surv.prob[,t] = plogis(.8 + .15*fake.data$sex -.19*(as.numeric(fake.data$color)-1) + .85*ran_sow[fake.data$Sow]+.05*t)
+}
+z <- matrix(NA, nrow= 100, ncol = 42)
+last.day <- censor <- array(NA)
+z[,1] <- 1
+for(i in 1:100){
+  for(t in 2:42){
+ z[i,t] <- rbinom(1,z[i,t-1],surv.prob[i,t])
+  }
+  last.day[i] <- ifelse(z[i,42] == 1, 42, which(z[i,] == 0)[1])
+  censor[i] <- ifelse(z[i,42] == 1, 1, 0) # 1= censor, 0 = died
+}
+fake.data$Out.Date = as.Date(fake.data$In.Date)+ last.day
+fake.data$censor = censor
+fake.data$sex <- ifelse(fake.data$sex == 1, "F", "M")
+#write.csv(fake.data, file = "pig_survival.csv")
+```
+
+Known-fate models are traditionally done with game species, but they don't have to be. Common textbook examples of these models include tracking turkeys after they hatch, releasing ducks each year and seeing how long they live before hunters shoot them (and return the tags), or collaring baby fawns. The study system itself doesn't really matter, the key to these models is that you're interested in survival. In some ways, these models are very similar to CJS models but without worrying about detection probability. 
+
+The scenario I've been working with recently is feral pigs. Pregnant female pigs were located on site and tracked until they gave birth. The piglets were then tracked for 42 days after they were born, though obviously tracking stopped if they died. Various covariates were also measured, such as which sow they came from, the experience level of the sow (older pigs may produce more successful piglets), the color of the piglet, the sex of the piglet, and the mass of the mom, among others. 
+
+The data started in a messy format, so we'll go through the cleanup process as well just for funsies. 
+
+Here's the "messy" form of our (mostly fake) data:
+```{r data1, eval = T, echo = F}
+kable(head(fake.data), digits = 3)
+```
+In this dataset, we can see that the "Out.Date" is sometimes the time the animal died and sometimes when the study period ended. We can tell which is the case based on the "censor" column - 1 means the animal lived throughout the study period, 0 means it died before the 42 day study period was over.
+
+Okay, so what do we do with this data? First let's talk about the model.
+
+\section{The Known-Fate Model}
+
+The true "meat" of a known fate model is really just two equations. 
+
+First, we assume some combination of individual and environmental factors affect the daily/monthly/time-step-of-interest survival probability. For now, let's call this daily survival. Like pretty much every other wildlife bayesian model, this should immediately make you think "ahh, we will be using a logit link and a linear model!"
+
+Okay, so some stuff goes together to affect survival. And then every day/month/time-step, the world flips a coin and says "yep, today you lived" or "nope sorry you have died". Of course, you can't have "zombie pigs" so if you're dead, you have to stay dead. That tells us that there has to be something about the previous state of live/deadness in the model in order for us to know if the animal will be alive next time. 
+
+
+In math terms,
+
+\begin{gather*}
+\phi_{it} = \frac{exp(\alpha_0 + X1_{it} + X2_{it} + \dots)}{exp(\alpha_0 + X1_{it} + X2_{it} + \dots) + 1}\\
+\mu_{it} = \phi_{it}  * y_{i(t-1)}\\
+y_{it} \sim \Bern(\mu_{it})
+\end{gather*}
+
+where $\phi_{it}$ is the probability of animal $i$ surviving from time $t$ to time $t+1$, $\alpha_0$, $X1_{it}$ and $X2_{it}$ represent various covariates on survival and $y_{i(t-1)}$ is the alive/dead state of animal $i$ in time $t-1$. 
+
+Believe it or not, that's literally the entire model! 
+
+So let's think about how to wrangle our data into a useful format. 
+\section{Data Cleanup}
+
+For this type of model, we don't need too many pieces of information. If you haven't coded this model before, it's hard to know what you'll need so I'll just tell you for now and you'll see how it all comes into play below. 
+
+We will need:
+- the number of individuals in our study
+- individual covariates 
+- numbered time periods with (ideally) equally spaced time intervals between them 
+- a matrix of observations of each individuals alive/dead state at all time periods
+- the first time period an animal was seen at
+- the last time period an animal was seen at
+
+Let's take a quick peek at our data again (available in a csv file in the github repository should you want to "run this with me"):
+```{r data, eval = T}
+neos <- read.csv("pig_survival.csv", stringsAsFactors = F)
+head(neos, n = 2)
+```
+
+I like to start with the dates and move on from there. First step, convert the dates to actual dates instead of characters.
+```{r}
+neos$In.Date <- as.Date(neos$In.Date, format = "%Y-%m-%d")
+neos$Out.Date <- as.Date(neos$Out.Date, format = "%Y-%m-%d")
+```
+
+Excellent. Now we can do math and make sequences of these dates much more easily. For this example, the interest is in daily survival and 42-day survival, so we want the occasions to be days. But since animals were born and died at random days, we don't have a convenient list of every day that exists between our start and end date of our data set. So we have to make one. 
+
+```{r}
+cap.dates <- sort(unique(c(neos$In.Date, neos$Out.Date)))
+cap.dates <- seq(cap.dates[1],cap.dates[length(cap.dates)], by = 1)
+occs <- length(cap.dates)
+```
+
+We end up with 1070 time periods, though obviously we don't have data for most of those. 
+
+Now we can grab what time period each individual was born (first seen) and the last time period we observed them in. We also need to get our "capture history" for the individuals, which is just a matrix of their alive/dead state at any given time. If we know they are alive (first time period to the second-to-last time period), we know their live state = 1. If they are dead, their live state = 0. If we don't know, it is an NA. 
+
+
+```{r}
+first <- last <- array(NA, dim = nrow(neos)) #first and last day we saw each bubs 
+surv.caps <-  matrix(data = NA, nrow = nrow(neos), ncol = occs) #cap.history
+for(i in 1:nrow(neos)){ #for each individual 
+  first[i] <- which(cap.dates == neos$In.Date[i]) #first seen
+  last[i] <- which(cap.dates == neos$Out.Date[i]) #last seen
+  surv.caps[i,first[i]:last[i]] <- 1 #it was alive for its lifetime obviously
+  if(neos$censor[i] == 0)# unless it died
+  {surv.caps[i,last[i]] <- 0} 
+  #if it died, it should be dead at the last occasion that we saw it 
+}
+```
+
+We can check our work on the first individual.
+```{r}
+neos[1,]
+surv.caps[1,1:10]
+```
+
+Lastly, we can standardize our continuous covariates and make sure all our categorial variables are numeric. 
+
+```{r}
+neos$Sow_mass_s <- (neos$Sow_mass - mean(neos$Sow_mass)) / sd(neos$Sow_mass)
+neos$mass_s <- (neos$mass - mean(neos$mass)) / sd(neos$mass)
+#could also use the scale function
+neos$color <- as.numeric(as.factor(neos$color))
+neos$sex <- as.numeric(as.factor(neos$sex))
+neos$Sow_numeric <- as.numeric(as.factor(neos$Sow))
+```
+
+Awesome, that's the hardest parts of our data wrangling done! Now on to coding.
+
+\section{Known-fate in JAGS}
+
+A lot of this model's difficulty is really just getting your data setup, which we saw in the last section.
+
+First step, let's convert that math above into code. Remember that the ugly fraction is just the logit transform (plogis in R, logit(something) in JAGS). 
+\subsection{Intercept Only}
+We'll start with a really simple linear model, one with no covariates. We can make it more complex later. 
+
+
+```{r code 1, eval = F,}
+logit(phi) <- beta0
+```
+
+Gorgeous. Next let's add in $\mu$ and $y$ which we know are going to change based on if the animal is alive or dead, so they have to be indexed by individual and by time.
+```{r, eval = F}
+logit(phi) <- beta0
+for (i in 1:n.ind){
+  for(t in 1:end.time){
+    mu[i,t] <- phi*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+  }
+}
+```
+
+Hmm, so we come across a problem. What time steps do we need to loop over? What happens if we are at a time step before our indiviual was born? And why do we need to calculate if the animal will survive if it's already dead?
+
+The answer is, we don't. We can make a loop that *changes for each individual*. 
+Assume that we can grab out which time step we first saw the animal in and then the last time we saw the animal (either because we stopped the study or it died). Then we can index our loop over only this time period for each individual! Of course, in the first time step, the animal was born so we don't really care about the first time step, just the second all the way through to the last time step. 
+
+Check this out:
+```{r, eval = F}
+logit(phi) <- beta0
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+  }
+}
+```
+
+This variable indexing is super cool and save a bunch of computation time. All that's left now is to give $beta0$ a prior and we can start thinking about running the model. 
+```{r, eval = F, echo = T}
+modelstring.neos_null = "
+model {
+logit(phi) <- beta0
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+  }
+}
+beta0 ~ dunif(-6,6)
+}
+"
+```
+We are also going to add in one more line to this code so that we can calculate WAIC and do model selection. WAIC works by taking the log-likelihood of whatever distribution our data is drawn from. So since we have a bernoulli in this case, we'll need a log-bernoulli. 
+```{r, eval = T}
+modelstring.neos_null = "
+model {
+logit(phi) <- beta0
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+    loglike[i,t] <- logdensity.bern(y[i,t], mu[i,t]) #for WAIC
+  }
+}
+beta0 ~ dunif(-6,6)
+}
+"
+```
+
+JAGS needs our data, our parameters of interest, some initial values and the name of our model. 
+```{r running jags}
+jd <- list(n.ind= nrow(neos), y = surv.caps, first = first, last = last)
+ji <- function(){list(beta0 = .5)}
+jp <- c("beta0", "phi", "loglike") #make sure to monitor "loglike" for WAIC
+library(runjags)
+piggies.null <- run.jags(model = modelstring.neos_null, monitor = jp, 
+                    data = jd, inits = ji, n.chains = 3, burnin = 1000, 
+                    sample = 2000, 
+                    adapt = 1000, method = "parallel", thin = 1)
+
+```
+```{r, results null jags}
+plot(piggies.null$mcmc[,c("beta0", "phi"),])
+summary(piggies.null$mcmc[,c("beta0", "phi"),])
+```
+
+Awesome! Our model looks good. Our daily survival probability is estimated to be between 98\% and 99\%. You might notice that output summary is different than you might have seen before - that's okay! I didn't want to run summary on EVERY parameter because there's a lot of log-likelihood estimates and I don't care about them individually. 
+
+But obviously not ever piglet has the same survival probability. We know this model we just ran is super unrealistic. So let's add in some covariates, like a random effect for Sow and some effect of birth weight.
+
+\subsection{Random Effects}
+But now that we're adding in Sow and individual weight, we have to make sure that phi is indexed by i, since each individual has a different mom and a different birth weight. Also note that we have to use *nested indexing* for the categorical variable. We'll provide sow, mass, and n.sow as data. 
+
+```{r, eval = T}
+modelstring.neos_Sow = "
+model {
+
+sigmaSow ~ dunif(0, .5)		# Random effect SD between 0 and .5
+  tauSow <- 1 / (sigmaSow * sigmaSow)
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, tauSow)
+}
+for (i in 1:n.ind){
+logit(phi[i]) <- beta0 + beta.Sow[sow[i]] + beta.mass*mass[i]
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi[i]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+    loglike[i,t] <- logdensity.bern(y[i,t], mu[i,t]) #for WAIC
+  }
+}
+beta0 ~ dunif(-6,6)
+beta.mass ~ dunif(-3,3)
+}
+"
+```
+
+Let's think about this for a minute. Let's say we tell the model, "hey individual 3 has sow #5". The model then says "okay, so the phi equation needs to use beta.Sow[5]". It goes up to the loop of beta.Sow's (1 beta for each Sow in our data) and says "okay, the effect on survival of this sow is a normal distribution, with mean 0 and standard deviation... something". With enough data, it will estimate this standard deviation for us. So why the tauSow? In JAGS, we can't just use sd in our normals, we have to use precision, which is 1/(sd^2).
+
+Let's see how this model looks when we run it.
+```{r running jags sow}
+n.sow = length(unique(neos$Sow))
+jd <- list(n.ind= nrow(neos), y = surv.caps, 
+           first = first, last = last, sow = neos$Sow_numeric, 
+           n.sow = n.sow, mass = neos$mass_s)
+ji <- function(){list(beta0 = .5, beta.Sow = runif(n.sow))}
+jp <- c("beta0", "phi", "loglike", "beta.Sow", "beta.mass") 
+#make sure to monitor "loglike" for WAIC
+library(runjags)
+piggies.Sow <- run.jags(model = modelstring.neos_Sow, monitor = jp, 
+                    data = jd, inits = ji, n.chains = 3, burnin = 1000, 
+                    sample = 2000, 
+                    adapt = 1000, method = "parallel", thin = 1)
+
+```
+
+Check some results. Rather than looking at all 100 survival probabilities and all 23 sow betas, I'll just graph and summarize a few.
+
+```{r, results sow jags}
+plot(piggies.Sow$mcmc[,c("beta0", "beta.Sow[1]", "beta.Sow[20]", 
+    "phi[1]", "phi[32]", "beta.mass"),])
+summary(piggies.Sow$mcmc[,c("beta0", "beta.Sow[1]", 
+    "beta.Sow[20]", "phi[1]", "phi[32]","beta.mass"),])
+```
+Individual 1 had the 20th Sow as his mom, and we can see that he has a slightly lower daily survival probability than individual 32, who had Sow 1 as his mom. This doesn't seem like that big a deal, but remember we've calculated *daily* survival. How likely are they to survive to day 42? Let's check:
+```{r}
+.9849^42
+.9906^42
+```
+Looks like individual 1 had about a 53\% chance of making it to the end of the study period, but number 32 only had an 67\% chance. If we look at our data, we can see that Sow 1 actually died during the study but 32 made it at least 42 days! 
+As for mass, we can see that the beta's CI crosses 0. This means that according to this model, either the effect of mass is fairly small or it isn't actually that important for piglet daily survival. 
+
+\subsection{Random Effect + Fixed Effect}
+
+Let's look at another model option. Maybe the sex is important or maybe there's also a year effect. Sex will be a categorical, but we can have the two sexes draw their betas independently, as a fixed effect. We might want the years to be a random effect to control the variation between years. Remember that JAGS uses precision not sd in normal distributions.
+
+```{r, eval = F}
+modelstring.neos_sexyear = "
+model {
+  
+  beta.sex[1] ~ dnorm(0, 1.5) #female
+  beta.sex[2] ~ dnorm(0, 1.5) #male
+  
+  sigmaSow ~ dunif(0, .5)		# Random effect SD between 0 and .5
+  tauSow <- 1 / (sigmaSow * sigmaSow)
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, tauSow)
+}
+  
+  sigmayear ~ dunif(0, .5)		# Random effect SD
+  tauyear <- 1 / (sigmayear * sigmayear)
+  
+for(t in 1:n.years){
+  beta.year[t] ~ dnorm(0, tauyear)
+}
+
+
+for (i in 1:n.ind){
+logit(phi[i]) <- beta0 + beta.sex[sex[i]] + beta.year[year[i]] + beta.Sow[sow[i]]
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi[i]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+    loglike[i,t] <- logdensity.bern(y[i,t], mu[i,t]) #for WAIC
+  }
+}
+beta0 ~ dunif(-3,5)
+}
+"
+```
+
+We can also ask JAGS to estimate the 42 day survival probability for each sex for us so we don't have to calculate it later in R. 
+```{r, eval = T}
+modelstring.neos_sexyear = "
+model {
+  
+  beta.sex[1] ~ dnorm(0, 1.5) #female
+  beta.sex[2] ~ dnorm(0, 1.5) #male
+  
+  sigmaSow ~ dunif(0, .5)		# Random effect SD between 0 and .5
+  tauSow <- 1 / (sigmaSow * sigmaSow)
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, tauSow)
+}
+  
+  sigmayear ~ dunif(0, .5)		# Random effect SD
+  tauyear <- 1 / (sigmayear * sigmayear)
+  
+for(t in 1:n.years){
+  beta.year[t] ~ dnorm(0, tauyear)
+}
+
+
+for (i in 1:n.ind){
+logit(phi[i]) <- beta0 + beta.sex[sex[i]] + beta.year[year[i]] + beta.Sow[sow[i]]
+  for(t in (first[i]+1):last[i]){
+    mu[i,t] <- phi[i]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+    loglike[i,t] <- logdensity.bern(y[i,t], mu[i,t]) #for WAIC
+  }
+}
+beta0 ~ dunif(-3,5)
+
+for (t in 1:n.years){
+  for (k in 1:n.sow){
+    logit(mean.phi.female[t,k]) <- beta0 + beta.sex[1] + beta.year[t] + beta.Sow[k] 
+    logit(mean.phi.male[t,k]) <- beta0 + beta.sex[2]  + beta.year[t] + beta.Sow[k]
+    male_42[t,k] <- pow(mean.phi.male[t,k], 42)
+    female_42[t,k] <- pow(mean.phi.female[t,k], 42)
+    }
+  }
+}
+"
+```
+Note that pow(x, 42) in JAGS just means $x^{42}$. 
+
+When we give JAGS our year information, we want to make sure the years correspond to "1", "2" and "3". 
+```{r}
+jd <- list(n.ind= nrow(neos), y = surv.caps, first = first, 
+           last = last, sex = neos$sex, n.years = 3, 
+           year = neos$year-2016, sow = neos$Sow_numeric, 
+           n.sow = n.sow) 
+ji <- function(){list(beta0 = .5, beta.sex = runif(2), beta.year = runif(3))}
+jp <- c("beta0","mean.phi.female", "beta.year",
+        "mean.phi.male", "male_42", "female_42" , 
+        "beta.sex", "loglike", "beta.Sow")
+library(runjags)
+piggies.sexyear <- run.jags(model = modelstring.neos_sexyear, monitor = jp, 
+                    data = jd, inits = ji, n.chains = 3, burnin = 20000, 
+                    sample = 1000, 
+                    adapt = 1000, method = "parallel", thin = 1)
+
+```
+
+Check a few results. Let's just look at results for individuals that have Sow 1 has their mom.
+```{r}
+plot(piggies.sexyear$mcmc[,c("beta0","mean.phi.female[1,1]", 
+           "mean.phi.male[1,1]", "beta.sex[1]", "beta.sex[2]"),])
+summary(piggies.sexyear$mcmc[,c("beta0","mean.phi.female[1,1]", "mean.phi.male[1,1]",
+            "male_42[1,1]","male_42[2,1]", "male_42[3,1]","female_42[1,1]",
+            "female_42[2,1]", "female_42[3,1]", "beta.sex[1]", "beta.sex[2]",
+            "beta.year[1]", "beta.year[2]", "beta.year[3]"),])
+```
+
+So what do these results tell us? Firstly, if you were born in year 2, your survival chances are probably lower than piglets born in other years (based on the beta.year estimates). Secondly there is some evidence of higher survival for male piglets (beta.sex[2] is larger than beta.sex[1]) but not much of a difference between sexes. 
+
+Let's look at one last model - dealing with survival changing as piglets age. 
+
+\subsection{Time Varying Survival}
+
+One thing about pigs is that they grow pretty fast. The day they are born, they're still pretty small and bad at surviving but by the end of the first month their survival skills have improved dramatically. 
+
+So how do we incorporate this into the model? If we had time-varying covariates that would be an easy way to change the model, but in this case we don't. So instead, we can "make" one to represent the age of the pig. 
+
+In theory we could make age a variable in our data frame and give the model the pig's age at any given time point. Or we could just do that *directly in the model* which is much faster. And feels more badass. 
+
+We do this by calculating current age of the pig as the current time period we are in, $t$, minus the first time we saw the pig (the day it was born). So if we are in the 25th time period but the piglet was born on the 10th day, the piglet would be age 15 days. 
+
+Let's try adding age and Sow effect into the same model.
+
+```{r, eval = T}
+modelstring.neos_SowAge = "
+model {
+
+sigmaSow ~ dunif(0, 2)		# Random effect SD between 0 and 2
+  tauSow <- 1 / (sigmaSow * sigmaSow)
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, tauSow)
+}
+
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+  logit(phi[i,t]) <- beta0 + beta.Sow[sow[i]] + beta.age*(t-first[i])
+    mu[i,t] <- phi[i,t]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+    loglike[i,t] <- logdensity.bern(y[i,t], mu[i,t]) #for WAIC
+  }
+}
+beta0 ~ dunif(-6,6)
+beta.age ~ dnorm(0,.5) #constrain to avoid difficulties with convergence
+
+}
+"
+```
+Not much changes from our sow model except that phi is now indexed by both i and t. 
+
+```{r}
+jd <- list(n.ind= nrow(neos), y = surv.caps, 
+           first = first, last = last, 
+           sow = neos$Sow_numeric, n.sow = n.sow)
+ji <- function(){list(beta0 = .5, beta.Sow = runif(n.sow))}
+jp <- c("beta0",  "loglike", "beta.Sow", "beta.age") 
+library(runjags)
+piggies.SowAge <- run.jags(model = modelstring.neos_SowAge, monitor = jp, 
+                    data = jd, inits = ji, n.chains = 3, burnin = 1000, 
+                    sample = 2000, 
+                    adapt = 1000, method = "parallel", thin = 1)
+
+```
+Check our output as always! Here's an additional trick - if you want to plot all the sows but don't want to write out every single indexed parameter, you can use "grep" to list all the variables following a given pattern:
+```{r}
+varnames(piggies.SowAge$mcmc)[grep("beta.Sow\\[", varnames(piggies.SowAge$mcmc))]
+```
+
+Here we can put that to use:
+```{r}
+summary(piggies.SowAge$mcmc[,c("beta0", 
+        varnames(piggies.SowAge$mcmc)[
+        grep("beta.Sow\\[", varnames(piggies.SowAge$mcmc))], 
+        "beta.age"), ])
+```
+
+These results suggest that not only does survival vary with Sow, it also appears to increase as the piglet gets older. This matches what we already know/suspect about piglets, so this shouldn't come as a surprise. 
+
+Now let's use that loglikelihood calculation we added to our code to rank our models. 
+\subsection{WAIC Table}
+
+Fair warning, I am absurdly proud of this WAIC table code. It's just so efficient! 
+First step, we need to write a function to turn our beautiful loglikelihoods that we calculated into WAIC. 
+
+```{r waic}
+calc.waic <- function(x){
+  vars <- grep("loglike", colnames(x$mcmc[[1]])) 
+  #find the output that relates to loglike
+  like <- as.matrix(x$mcmc[,vars,]) 
+  fbar <- colMeans(like) #mean log-likelihood 
+  Pw <- sum(apply(like,2,var)) #mean variance in log-likelihood 
+  WAIC<- -2*sum(fbar)+2*Pw
+  return(WAIC)
+}
+```
+
+This function can be used on individual models if we want.
+
+```{r}
+calc.waic(piggies.null)
+```
+
+But if you have a bunch of models, that's a pain. So, here comes the part of the code that I'm proud of. 
+
+We can ask R for all the models that follow a similar name that are listed in our R environment. This code is actually storing the objects themselves as list in a new object, rather than just grabbing the names of the models. 
+```{r}
+mymodels <- mget(ls()[grep("piggies", ls())]) #grabs all models in your environment
+mymodels
+```
+
+Now we can use our WAIC function on all of these models and output a table. 
+
+```{r, }
+#empty data frame
+WAIC <- data.frame(modname = ls()[grep("piggies", ls())], 
+                  WAIC = rep(NA, length(mymodels)))
+#run the WAIC code for each model 
+for(i in 1:length(mymodels)){
+WAIC[i,2] <-  calc.waic(mymodels[[i]])
+}
+
+#model weights table
+WAIC$deltaWAIC <- WAIC$WAIC-min(WAIC$WAIC)
+WAIC$rel_like <- exp(-.5*WAIC$deltaWAIC)
+WAIC$weight <- WAIC$rel_like/sum(WAIC$rel_like)
+```
+```{r, eval = F}
+WAIC[order(-WAIC$weight),]
+```
+```{r, echo = F}
+kable(WAIC[order(-WAIC$weight),], digits = 2)
+```
+
+Looks like all our weight is on the model SowAge! Of course, we didn't test all combinations of variables so we only know it's the best model of the models we tested. 
+
+\section{Graphing Survival Curves}
+
+In the case of this study, the researchers were interested in the probability of an individual surviving for 42 days. A nice way to report the findings is a survival curve. We calculate the daily probability for individuals in our study, but the differences in daily probabilities don't always stand out without a visual. 
+
+Survival curves are just the cumulative probability of an animal surviving a certain number of days. When survival probability is the same at each time step, it's just $phi^{time}$. When it changes by time, it's just the product of each daily probability. 
+
+First, we need to grab the parameters needed to calculate the daily survival for piglets from each Sow. We'll use the quantiles part of the output. 
+
+```{r}
+variables <- summary(piggies.SowAge$mcmc[,c("beta0", 
+            varnames(piggies.SowAge$mcmc)[grep(
+            "beta.Sow\\[", varnames(piggies.SowAge$mcmc))], 
+            "beta.age"), ])$quantiles
+head(variables, n = 3)
+```
+
+Now, we can stick these values into an equation. Our output will have one row for each sow and one column for each daily survival probability. We'll calculate out to 42 days.
+```{r}
+daily.surv <- cum.surv <- matrix(NA, nrow = n.sow, ncol = 42)
+for(i in 1:n.sow){
+  #plogis(beta.0 + beta.Sow + beta.age*age)
+daily.surv[i,] <- plogis(variables[1,3] + variables[i+1, 3] 
+                         + variables[25,3]*1:42)
+cum.surv[i,] <- cumprod(daily.surv[i,])
+}
+```
+The natural impulse might be to graph the daily probabilities straight up, but that only tells you how daily survival is changing over time, not the probability of surviving a certain length of time. 
+
+For base R:
+```{r}
+plot(1:42, cum.surv[1,], type = "l", col = rainbow(n.sow)[1],
+     xlim = c(0, 42), ylim = c(0, 1), 
+     main = "Cummulative Survival Probability", xlab = "Days",
+     ylab = "Survival Probability")
+for(i in 2:n.sow){
+  lines(1:42, cum.surv[i,], type = "l", col = rainbow(n.sow)[i])
+}
+legend("bottomright", paste("Sow #", c(1:11, 13:24), sep = ""), 
+       lty = 1, col = rainbow(n.sow), cex = .5)
+#Sow 12 didn't have any babies in our data set
+```
+
+For ggplot2, we have to change the format of our data into long format, which is easy to do with the pivot_longer function. 
+
+```{r}
+library(ggplot2)
+library(tidyr)
+cum.surv <- as.data.frame(cum.surv)
+cum.surv$Sow = paste("Sow", c(1:11, 13:24), sep = "")
+long_surv <- pivot_longer(cum.surv, cols = starts_with("V"))
+long_surv$age <- rep(1:42, n.sow)
+
+print(ggplot(long_surv, aes(x = age, y = value, col = Sow, group = Sow))+
+  geom_line()+
+  theme_classic()+
+  ylim(0,1)+
+  xlab("Days")+
+  ylab("Survival Probability"))
+
+```
+
+
+Awesome!
+
+\section{Known Fate Models in NIMBLE}
+
+Running known fate models in NIMBLE is actually not that different from running them in JAGS. BUT you can do run more of them much more efficiently. For one thing, because you can run a model with multiple datasets without having to re-compile the model, you can write just one big model with all your covariates and then turn the covariates on and off for each model run. This is a HUGE time saver. Technically you could do this in JAGS to, but it wouldn't save you any time except for the physical typing part. 
+
+So first, let's build our big model with all the covariates in it. Remember that in NIMBLE we can ask it to calculate WAIC for us, plus we can use sd or precision in our normal distributions! 
+
+```{r, eval = F, echo = T}
+piggies.all <- nimbleCode({
+  
+  #sow effects
+sigmaSow ~ dunif(0, .5)	
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, sd = sigmaSow)
+}
+  
+  #sex effects
+  beta.sex[1] ~ dnorm(0, sd = .5) #female
+  beta.sex[2] ~ dnorm(0, sd= .5) #male
+  
+  
+  sigmayear ~ dunif(0, .5)		# Random effect SD
+  
+for(t in 1:n.years){
+  beta.year[t] ~ dnorm(0, sd = sigmayear)
+}
+
+
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+  logit(phi[i,t]) <- beta0 + beta.Sow[sow[i]] + 
+    beta.age*(t-first[i]) + beta.sex[sex[i]] + 
+    beta.year[year[i]]+beta.mass*mass[i]
+    mu[i,t] <- phi[i,t]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+  }
+}
+beta0 ~ dunif(-6,6)
+beta.age ~ dnorm(0,.5) #constrain to avoid difficulties with convergence
+beta.mass ~ dnorm(0,.5) #constrain to avoid difficulties with convergence
+})
+```
+
+Now we can add in the "switches" which we will set to 1 to "turn on" the covariate or 0 to "turn off". On will be given to NIMBLE as data in the form of a vector of 5 numbers (0 and 1's). 
+```{r, eval = T}
+piggies.all <- nimbleCode({
+  
+  #sow effects
+sigmaSow ~ dunif(0, 2)	
+for(k in 1:n.sow){
+  beta.Sow[k] ~ dnorm(0, sd = sigmaSow)
+}
+  
+  #sex effects
+  beta.sex[1] ~ dnorm(0, sd = .5) #female
+  beta.sex[2] ~ dnorm(0, sd= .5) #male
+  
+  
+  sigmayear ~ dunif(0, 2)		# Random effect SD
+  
+for(t in 1:n.years){
+  beta.year[t] ~ dnorm(0, sd = sigmayear)
+}
+
+
+for (i in 1:n.ind){
+  for(t in (first[i]+1):last[i]){
+  logit(phi[i,t]) <- beta0 + beta.Sow[sow[i]]*on[1] + 
+    beta.age*(t-first[i])*on[2] + beta.sex[sex[i]]*on[3] + 
+    beta.year[year[i]]*on[4] +
+    beta.mass*mass[i]*on[5]
+  
+    mu[i,t] <- phi[i,t]*y[i,t-1]
+    y[i,t] ~dbern(mu[i,t])
+  }
+}
+beta0 ~ dunif(-6,6)
+beta.age ~ dnorm(0,sd =.25) #constrain to avoid difficulties with convergence
+beta.mass ~ dnorm(0,sd = .25) #constrain to avoid difficulties with convergence
+})
+```
+We could also write derived params into our model and just use the same switches that we use to turn covariates on and off, but I'll skip that for now. 
+
+Next we can get our data, inits and params ready to go to run our model. First we'll run the null model but everything except the "on" vector in data will be the same for all runs. \subsection{Intercept Only}
+```{r}
+n.params <- c("beta0", "beta.Sow","beta.age", "beta.sex", "beta.year", "beta.mass") 
+n.constants <- list(n.ind= nrow(neos), first = first,
+                    last = last, sow = neos$Sow_numeric,
+                    n.sow = n.sow, mass= neos$mass_s, 
+                    year = neos$year-2016, 
+                    sex = neos$sex, n.years = 3)
+n.data <- list(y = surv.caps, on = c(0,0,0,0,0))
+n.inits <- list(beta0 = runif(1), beta.age = runif(1), beta.mass = runif(1), 
+                beta.Sow = runif(n.sow), beta.sex = runif(2), sigmayear = runif(1),
+                sigmaSow = runif(1))
+```
+
+Time to start our model runs. 
+
+```{r}
+preppigs <- nimbleModel(code = piggies.all, 
+                        constants = n.constants, 
+                        data = n.data, 
+                        inits = n.inits)
+preppigs$initializeInfo()
+```
+Hmm, we seem to be missing some values that we'll want to initialize. First we'll have NIMBLE find values for beta.year, then we'll have it follow through with those values to initialize phi and mu. Note that y will always have some NA's - those are all the times the piglets weren't born or we weren't following them around. 
+
+```{r}
+preppigs$simulate("beta.year")
+preppigs$calculate("phi")
+preppigs$calculate("mu")
+```
+
+Notice if we run initializeinfo() again, we'll still have NA's. This is because phi and mu are also unknown for large quantities of time in our model. That's okay! We don't need to know them at every step because they aren't relevant. 
+
+Onwards to the other parts of the model. Make sure to add "enableWAIC = T"
+
+```{r}
+mcmcpigs <- configureMCMC(preppigs, monitors = n.params, print = T, enableWAIC = T)
+pigsMCMC <- buildMCMC(mcmcpigs)
+Cmodel <- compileNimble(preppigs)
+Comppigs <- compileNimble(pigsMCMC, project = preppigs)
+Comppigs$run(niter = 1000, nburnin = 500)
+```
+In a minute we'll run this in parallel, but for now we're just doing some test chains to make sure everything is working. Let see what we get out:
+```{r}
+tail(as.mcmc(as.matrix(Comppigs$mvSamples)), n = 5)
+```
+A lot of output! But remember because we "turned off" all the covariates, the only relevant one is beta0.
+
+To get our WAIC out, we can use this method:
+```{r}
+Comppigs$calculateWAIC()
+```
+Excellent. Let's try a full run of this model now with 3 chains. 
+
+```{r}
+library(parallel)
+cl <- makeCluster(3)
+clusterExport(cl = cl, varlist = c("n.constants", "n.data", 
+                                  "n.inits", "n.params", "piggies.all"))
+nimblepigs.null <- clusterEvalQ(cl = cl, {
+  library(nimble)
+  library(coda)
+  preppigs <- nimbleModel(code = piggies.all, 
+                          constants = n.constants, 
+                          data = n.data, inits = n.inits)
+  preppigs$simulate("beta.year")
+  preppigs$calculate("phi")
+  preppigs$calculate("mu")
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
+  pigsMCMC <- buildMCMC(mcmcpigs)
+  Cmodel <- compileNimble(preppigs)
+  Comppigs <- compileNimble(pigsMCMC, project = preppigs)
+  Comppigs$run(niter = 1000, nburnin = 500)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), 
+              waic = Comppigs$calculateWAIC()))
+})
+```
+
+Let's check a few of our results
+```{r}
+null.outputs <- mcmc.list(nimblepigs.null[[1]]$outs, 
+                          nimblepigs.null[[2]]$outs, 
+                          nimblepigs.null[[3]]$outs)
+plot(null.outputs[,"beta0",])
+summary(null.outputs[,"beta0"])
+```
+
+Awesome! Results look about the same for our null model as they did in JAGS. We will grab out WAIC values at the end, much like we did in JAGS.
+
+\subsection{Random Effects}
+Our next model is one that includes the Sow and the birth mass of the piglet. These are the 1st and 5th "switches" in our model. 
+
+Without closing the cluster we made for the null model, we can just change the value of the switches and re run the model, only this time it will be running our random effects model! Note that we don't need to rerun the "nimbleModel" part of our code, we can just select the data in our "preppigs" object and change our values directly.
+
+```{r}
+nimblepigs.Sow <- clusterEvalQ(cl = cl, {
+ preppigs$on <- c(1,0,0,0,1)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
+  pigsMCMC <- buildMCMC(mcmcpigs)
+  Cmodel <- compileNimble(preppigs)
+  Comppigs <- compileNimble(pigsMCMC, project = preppigs)
+  Comppigs$run(niter = 1000, nburnin = 500)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), waic = Comppigs$calculateWAIC()))
+})
+```
+
+Excellent, let's evaluate our results.
+```{r}
+Sow.outputs <- mcmc.list(nimblepigs.Sow[[1]]$outs, 
+                         nimblepigs.Sow[[2]]$outs, 
+                         nimblepigs.Sow[[3]]$outs)
+plot(Sow.outputs[,c("beta0", "beta.Sow[1]", "beta.mass"),])
+summary(Sow.outputs[,c("beta0", "beta.Sow[1]", 
+                       "beta.Sow[2]", "beta.mass"),])
+```
+
+No surprise, the results are basically the same as we got from JAGS. 
+
+\subsection{Random + Fixed Effects}
+Next comes our year model, which has sex, sow and year in it but does not have mass. This means we need to turn on switches 1, 3, and 4 but turn off all the others. 
+
+```{r}
+nimblepigs.sexyear <- clusterEvalQ(cl = cl, {
+ preppigs$on <- c(1,0,1,1,0)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
+  pigsMCMC <- buildMCMC(mcmcpigs)
+  Cmodel <- compileNimble(preppigs)
+  Comppigs <- compileNimble(pigsMCMC, project = preppigs)
+  Comppigs$run(niter = 3000, nburnin = 2000)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), 
+              waic = Comppigs$calculateWAIC()))
+})
+```
+
+```{r}
+sexyear.outputs <- mcmc.list(nimblepigs.sexyear[[1]]$outs, 
+                             nimblepigs.sexyear[[2]]$outs, 
+                             nimblepigs.sexyear[[3]]$outs)
+plot(sexyear.outputs[,c("beta0", "beta.Sow[1]", 
+                        "beta.year[1]","beta.sex[1]", 
+                        "beta.sex[2]"),])
+summary(sexyear.outputs[,c("beta0", "beta.Sow[1]", 
+                           "beta.year[1]","beta.year[2]",
+                           "beta.year[3]", "beta.sex[1]",
+                           "beta.sex[2]"),])
+```
+
+We could probably have done with a few more iterations to make sure we don't introduce error into our estimates from the MCMC process, but the results are essentially the same from JAGS. 
+
+Finally, let's run the Time Varying model
+\subsection{Time Varying Survival}
+
+This model only includes an intercept, sow and age. 
+```{r}
+nimblepigs.SowAge <- clusterEvalQ(cl = cl, {
+ preppigs$on <- c(1,1,0,0,0)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
+  pigsMCMC <- buildMCMC(mcmcpigs)
+  Cmodel <- compileNimble(preppigs)
+  Comppigs <- compileNimble(pigsMCMC, project = preppigs)
+  Comppigs$run(niter = 3000, nburnin = 2000)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)),
+              waic = Comppigs$calculateWAIC()))
+})
+```
+
+```{r}
+sowage.outputs <- mcmc.list(nimblepigs.SowAge[[1]]$outs, 
+                            nimblepigs.SowAge[[2]]$outs, 
+                            nimblepigs.SowAge[[3]]$outs)
+plot(sowage.outputs[,c("beta0", "beta.Sow[1]", "beta.age"),])
+summary(sowage.outputs[,c("beta0", "beta.Sow[1]", 
+                          "beta.Sow[2]","beta.age"),])
+```
+
+
+Time for the WAIC table!
+
+\subsection{WAIC Table}
+
+We can use similar code to collect our model WAICs, but this time the WAIC scores themselves are calculated which saves us some time. This is not as clean a code as the one we can use for JAGS, but it gets the job done. 
+```{r}
+nim.models <- mget(ls()[grep("nimblepigs", ls())]) #grabs all models in your environment!
+```
+```{r}
+WAIC_nim <- data.frame(modname = ls()[grep("nimblepigs", ls())],
+                       WAIC = rep(NA, length(nim.models)))
+
+for(i in 1:length(nim.models)){
+WAIC_nim[i,2] <-  mean(unlist(nim.models[[i]],F)[[2]],
+                       unlist(nim.models[[i]],F)[[4]],
+                       unlist(nim.models[[i]],F)[[6]])
+}
+
+#model weights table
+WAIC_nim$deltaWAIC <- WAIC_nim$WAIC-min(WAIC_nim$WAIC)
+WAIC_nim$rel_like <- exp(-.5*WAIC_nim$deltaWAIC)
+WAIC_nim$weight <- WAIC_nim$rel_like/sum(WAIC_nim$rel_like)
+```
+```{r, eval = F}
+WAIC_nim[order(-WAIC_nim$weight),]
+```
+```{r, echo = F}
+kable(WAIC_nim[order(-WAIC_nim$weight),], digits = 2)
+```
+
+Once again, SowAge comes out on top! 
+
+\section{Graphing NIMBLE results}
+Graphing from NIMBLE isn't any different but just for kicks, here's the code to do it. 
+
+```{r}
+variables <- summary(sowage.outputs)$quantiles
+daily.surv <- cum.surv <- matrix(NA, nrow = n.sow, ncol = 42)
+for(i in 1:n.sow){
+#plogis(beta.0 + beta.Sow + beta.age*age)
+daily.surv[i,] <- plogis(variables[31,3] + variables[i, 3] + variables[24,3]*1:42)
+cum.surv[i,] <- cumprod(daily.surv[i,])
+}
+```
+
+For base R:
+```{r}
+plot(1:42, cum.surv[1,], type = "l", col = rainbow(n.sow)[1],
+     xlim = c(0, 42), ylim = c(0, 1), 
+     main = "Cummulative Survival Probability", xlab = "Days", 
+     ylab = "Survival Probability")
+for(i in 2:n.sow){
+  lines(1:42, cum.surv[i,], type = "l", col = rainbow(n.sow)[i])
+}
+legend("bottomright", paste("Sow #", c(1:11, 13:24), sep = ""), 
+       lty = 1, col = rainbow(n.sow), cex = .5)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+cum.surv <- as.data.frame(cum.surv)
+cum.surv$Sow = paste("Sow", c(1:11, 13:24), sep = "")
+long_surv <- pivot_longer(cum.surv, cols = starts_with("V"))
+long_surv$age <- rep(1:42, n.sow)
+
+print(ggplot(long_surv, aes(x = age, y = value, col = Sow, group = Sow))+
+  geom_line()+
+  theme_classic()+
+  ylim(0,1)+
+  xlab("Days")+
+  ylab("Survival Probability"))
+
+```
+
+Whooo look at that gorgeous curve! 
