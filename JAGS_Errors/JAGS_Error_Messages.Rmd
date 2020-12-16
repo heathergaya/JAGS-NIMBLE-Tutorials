@@ -2,7 +2,7 @@
 ---
 title: "Jags Error Messages"
 author: Heather Gaya, heather.e.gaya@gmail.com
-date: "10/5/2020"
+date: "12/15/2020"
 output:
   pdf_document
 ---
@@ -462,9 +462,58 @@ jags.post.samples <- run.jags(model = modelstring.correct,  data=jags.data,
 
 In this case, when JAGS gets down to the part of the model that loops over all the sites, it doesn't know what "nSites" means unless we give it that data in the data argument OR we hardcode it into the model somewhere. 
 
+## Invalid Variable Subset 
+
+Let's say, for whatever reason, we want to monitor the variable "z". This variable tells us "was the site actually occupied?" with a 1 = "yep!" and a 0 = "no birds here!" If you're new to indexing you might think the variable is named "z[i]" and try to monitor it like this:
+
+```{r wrong variable, error = T}
+jags.data <- list(y = as.matrix(y), nSites=109, nOccasions=4)
+jags.pars <- c("psi", "p", "sitesOccupied", "z[i]")
+jags.post.samples <- run.jags(model = modelstring.correct,  data=jags.data,
+                              inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+Obviously that's a no go. You can monitor z in two ways, just not the way we tried above. You can either monitor a specific z, for instance, the z value for site 32:
+```{r, eval = F, echo = T}
+jags.pars <- c("psi", "p", "sitesOccupied", "z[32]")
+```
+or you can monitor all the z values by removing all the indices:
+```{r, eval = F, echo = T}
+jags.pars <- c("psi", "p", "sitesOccupied", "z")
+```
 
 
-## Cannot Resolve Node and Cannot Evaluate Subset Expression for sitesOccupied
+## Not a Fully Named List
+(This is technically an R error, not a JAGS error, but I'll stick in here anyway)
+
+A quick error that does not come up very often results from forgetting to name all the variables in your list that you give to jags.data. For instance, look what happens if we forget to write y = as.matrix(y) and just give jags the data without a name.
+```{r no names, error = T}
+jags.data <- list(as.matrix(y), nSites=109, nOccasions=4)
+jags.post.samples <- run.jags(model = modelstring.correct,  data=jags.data,
+                              inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+Similarly, you can also forget to name your inits list. 
+
+```{r no names2, error = T}
+jags.data <- list(y = as.matrix(y), nSites=109, nOccasions=4)
+jags.inits <- function(){
+  list(rep(1, 109))
+}
+jags.post.samples <- run.jags(model = modelstring.correct,  data=jags.data,
+                              inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, silent.jags = F)
+```
+
+## Cannot Resolve Node and Cannot Evaluate Subset Expression
 For these errors, we have to make our model a little more complex. Let's model some site covariates. Now psi is no longer just one value - instead it might change based on some site characteristic, like rainfall. 
 
 ```{r model again2}
@@ -481,7 +530,7 @@ p ~ dunif(0,1)
 for(i in 1:nSites) {
 logit(psi[i]) <- psi.beta0+psi.beta1*rainfall[i]
   # Latent presence/absence
-  z[i] ~ dbern(psi)   
+  z[i] ~ dbern(psi[i])   
   for(j in 1:nOccasions) {
     # Model for the data
     y[i,j] ~ dbern(z[i]*p)
@@ -529,7 +578,7 @@ p ~ dunif(0,1)
 for(i in 1:nSites) {
 logit(psi[i]) <- psi.beta0+psi.beta1*rainfall[i]
   # Latent presence/absence
-  z[i] ~ dbern(psi)   
+  z[i] ~ dbern(psi[i])   
   for(j in 1:nOccasions) {
     # Model for the data
     y[i,j] ~ dbern(z[i]*p)
@@ -553,8 +602,104 @@ Ahh, there it is! The 'real' error in this case was "Unable to resolve the follo
 
 Note that if you actually have NA's you can either remove them from your data, or model them from a distribution bound by reasonable ranges of the covariate. This assumes that the distribution of the covariate in your data is the same as the distribution of the covariate at your study site or in your population, which is not always a fair assumption. So be careful out there... NA's are tricky buggers! 
 
-
 # Other Errors
+## Invalid Vector Argument
+
+Okay, this one is another model writing error but I didn't want to go back and change the whole format of this document, so I've stuck it at the bottom. It rarely comes up but sometimes you forget to index something and then send it through an expression. For instance, what if we forget to index rainfall and just multiply the psi.beta1 by all the rainfall values for every site? 
+```{r vector error model}
+modelstring.sad8 = "
+model {
+
+# Priors for occupancy parameters
+psi.beta0 ~ dunif(-3,3)
+psi.beta1 ~ dunif(-3,3)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+logit(psi[i]) <- psi.beta0+psi.beta1*rainfall #removed the index on rainfall
+  # Latent presence/absence
+  z[i] ~ dbern(psi[i])   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+Let's now send all our data through JAGS like usual. Note that the error will appear and then runjags will also spew a lot of other messages. This makes it really fun to try and track the error down.  
+```{r, error = T}
+rainfall = runif(109, 0, 10) #just making up some rainfall data
+jags.data <- list(y=as.matrix(y), nSites=109, nOccasions=4, rainfall = rainfall)
+jags.inits <- function() {
+  list(z=rep(1, 109))
+}
+jags.post.samples <- run.jags(model = modelstring.sad8,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel", silent.jags = F)
+```
+
+Oops, there it is - "Invalid vector argument to ilogit". You'll see similar issues with other expressions so "ilogit" might be "exp" or "log" or some variation on that theme. Regardless, the problem is indexing! 
+
+## Unexpected NAME, Expecting INT or Error Calculating Log Density
+
+This error happens if your model tries to make the model divide something by 0 or take the log of a negative or something similarly impossible. Note - this only happens if the answer is sometimes possible. For instance, log(-2) will give you a parent node error but log(z[i] - 1) will throw this error. This is because log(z[i] - 1) will either give us log(0) or log(-1). Since the answer is sometimes possible, JAGS throws this new really weird error. 
+
+```{r weird error model}
+modelstring.sad9 = "
+model {
+
+# Priors for occupancy parameters
+psi.beta0 ~ dunif(-3,3)
+psi.beta1 ~ dunif(-3,3)
+
+# Prior for detection probability
+p ~ dunif(0,1)
+
+for(i in 1:nSites) {
+logit(psi[i]) <- psi.beta0+psi.beta1*rainfall[i] 
+  # Latent presence/absence
+  z[i] ~ dbern(psi[i])   
+  for(j in 1:nOccasions) {
+    # Model for the data
+    y[i,j] ~ dbern(z[i]*p)
+  }
+b[i] <- log(z[i]-1)
+
+}
+
+sitesOccupied <- sum(z)
+
+}
+"
+```
+
+Let's see what happens if we start with p = 1.  
+
+```{r, error = T}
+rainfall = runif(109, 0, 10) #just making up some rainfall data
+jags.data <- list(y=as.matrix(y), nSites=109, nOccasions=4, rainfall = rainfall)
+jags.inits <- function() {
+  list(z=rep(1, 109))
+}
+jags.post.samples <- run.jags(model = modelstring.sad9,  
+                              data=jags.data, inits=jags.inits,
+                                monitor=jags.pars,
+                                n.chains=3, adapt=100, burnin=100,
+                                sample=2000, method = "parallel", silent.jags = F)
+```
+
+
+
+## Other Errors?
 
 Do you have any other strange JAGS errors you've come across? Let me know! Hopefully this manual will evolve with time as new and exciting errors make their way across my R console :) 
 
