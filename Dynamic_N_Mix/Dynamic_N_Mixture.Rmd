@@ -1,0 +1,728 @@
+---
+title: "Dynamic N-Mixture Models"
+author: "Heather Gaya"
+date: "12/16/2020"
+output: pdf_document
+---
+\newcommand{\bs}{{\bm s}}
+\newcommand{\cS}{{\mathcal S}}
+\newcommand{\ds}{{\, \mathrm{d} \bm s}}
+\newcommand{\Bern}{{\mathrm{Bern}}}
+\newcommand{\Bin}{{\mathrm{Bin}}}
+\newcommand{\Po}{{\mathrm{Pois}}}
+\newcommand{\Gam}{{\mathrm{Gamma}}}
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width = 8, collapse = TRUE)
+library(coda)
+library(runjags)
+library(knitr)
+library(nimble)
+library(tidyr)
+library(dplyr)
+```
+N-mixture models are a flexible way to get abundance estimates count data. I've previously discussed closed N-mixture models, but those are way less fun than open population models! Today I'm going to use the example of bird point counts and show two ways to run a multi-season N-mixture model (5 years of data) in both JAGS and NIMBLE. In this case I'll be ignoring any possible density dependence, so it's not really quite as exciting as it sounds. 
+
+I'm assuming for now that everyone has downloaded JAGS and NIMBLE and has them setup on their computers. Before you use NIMBLE make sure R, and Rtools or Xcode are updated on your computer (otherwise a weird "shared library" error can come up).  JAGS is downloadable here: <https://sourceforge.net/projects/mcmc-jags/> and NIMBLE can be found here: <https://r-nimble.org/download> 
+
+Please send any questions or suggestions to heather.e.gaya(at)gmail.com or find me on twitter: doofgradstudent
+
+\tableofcontents
+\newpage
+
+\section{Our Data}
+For once, we will be using real data, though we'll only be using a portion of it because I'm hoping to publish a paper with this data in the near future and the full dataset is a beast. 
+
+In this case, our dataset is point count data from 48 (from the total 109) sites in the Southern Appalachian Mountains. Point counts are performed for 10 minutes in 2.5 minute intervals. All species that are seen or heard are mapped as detected, so we know the general distance interval where each bird was detected at each interval. We also have a record of the time of survey (in minutes since midnight, standardized) and some environmental covariates about each site. Here's a subset of our data:
+
+```{r}
+Covs <- read.csv("Site_Covs.csv")
+Dets <- read.csv("Site_Obs.csv")
+head(Dets, n =3)
+head(Covs, n = 3)
+```
+
+Fun stuff! 
+
+\section{The Meat of a Dynamic N-Mixture Model}
+
+Recall that the basic N-mixture model assumes that the population is closed, or is only looking at one moment in time. There is some expected number of individual at a site, $\lambda$, which is based on site covariates in the form of a linear equation. The actual number of individuals, $N$, is then drawn from a poisson distribution or some other distribution of your choosing. In a perfect world, the expected and the actual numbers would be equal ($\lambda$ = $N$), but the real world has more variation than that. 
+
+In general, a closed-population N-mixture model looks like this:
+\begin{gather*}
+\mathrm{log}(\lambda_{i}) = \beta_0 + \beta_1 {x_{i1}} +
+    \beta_2 {x_{i2}} + \cdots \\
+    N_{i} \sim \mathrm{Poisson}(\lambda_{i})
+\end{gather*}    
+
+where $\lambda_{i}$ is the expected value of abundance at site $i$, $N_{i}$ is the realized value of abundance at site $i$ and $x_1$ and $x_2$ are site covariates. Note that you can draw $N_i$ from other distributions, but I prefer the poisson.
+
+\subsection{Simple Dynamic Model}
+An intuitive open population n-mixture model can be built simply by indexing everything in a close population model by another dimension (time) and calling it good. I mean, if we think the process is happening in year 1, why wouldn't that same process happen every year? 
+
+To write a model this way, we can say:
+\begin{gather*}
+\mathrm{log}(\lambda_{it}) = \beta_0 + \beta_1 {x_{it1}} +
+    \beta_2 {x_{it2}} + \cdots \\
+    N_{it} \sim \mathrm{Poisson}(\lambda_{it})
+\end{gather*}    
+where $\lambda_{it}$ is the expected value of abundance at site $i$ at time $t$, $N_{it}$ is the realized value of abundance at site $i$ at time $t$ and $x_1$ and $x_2$ are site covariates. Note that your covariates can be indexed by time (things like precipitation, temperature, etc.) or just by site (elevation, forest type, etc.). 
+
+In the case of our bird data, we think the expected abundance of our species of interest (let's say the Ovenbird) is influenced by the elevational gradient and the average temperature of the site during the breeding season. We could write our model as:
+
+\begin{gather*}
+\mathrm{log}(\lambda_{it}) = \beta_0 + \beta_1 {Elev_{i}} +
+    \beta_2 {Temp_{it}} + \cdots \\
+    N_{it} \sim \mathrm{Poisson}(\lambda_{it})
+\end{gather*}    
+
+We could also let our $\beta$ coefficients be indexed by time if we thought the way ovenbirds react to temperature is changing over time or add additional complexities if we wanted to.
+
+This version of the model is nice because you don't really have to worry about temporal effects or really think about how the individuals arrive at the site or anything like that. They simply are attracted to environmental covariates and more of them arrive when the covariates are favorable. It's a step up from running a bunch of years of data independently because you have the option of sharing the $\beta$ values between years, which means you have more data to inform your parameters. 
+
+However, this formulation ignores temporal autocorrelation and it also is a little weird to think about for some species. For instance, if you had a long-lived species that doesn't migrate or an animal where adults doesn't tend to move from their home territories, we might expect that the population levels from the year before will have a pretty big impact on the current year's abundance. For my own work, Ovenbirds captured and banded at our mist net arrays in North Carolina are often caught on the same plot year after year and will return to their previous year's territories even as populations rise and fall. To better understand these dynamics, we need a slightly more complicated model. 
+
+\subsection{Dail and Madsen (2011) Model }
+
+Luckily, ecologists are pretty smart and someone came along and invented a more complicated model! This model comes from a paper by Dale and Madsen (2011) which can be found here: <https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1541-0420.2010.01465.x> It's also used in Applied Hierarchical Modeling by Marc Kéry & Andy Royle, which is an all around great resource for anyone doing Bayesian ecology analysis. 
+
+\subsubsection{BIDE Model}
+
+But before we get to that, let's take a step back. What causes populations to change? An easy framework is the BIDE model - population changes are really just a combination of births, immigration (moving into the pop), deaths and emigration (moving out of the pop). Under this framework, the population at time $t+1$ ($N_{t+1}$) is just $N_t + B + I - D - E$. This formulation specifies births and deaths in terms of individuals, but we can also think of it in terms of rates (birth rate, death rate, etc.).
+
+Often, we can't really separate deaths and emigration because an animal could wander out of a study site and not come back but still be alive and kicking. Similarly, new animals can show up in an area that have been alive for quite some time but never detected. So instead we end up with apparent survival (animals that did not die and did not emigrate) and apparent recruitment (new animals in the population, either through birth or movement). Since these are both rates, we can now think of the population at $t+1$ as:
+\begin{gather*}
+N_{t+1} = N_tS_t + N_tG_t
+\end{gather*}
+where $S_t$ is apparent survival and $G_t$ is apparent recruitment. 
+
+Note: This will come up in a minute, but does it really make sense for immigration to be influenced by the previous year's population? Probably not, but we'll get there.
+
+\subsubsection{Apparent Recruitment and Survival}
+
+So this is all well and good, you might say to yourself, but how does that relate to N-mixture models? All we have is count data, how the heck are we supposed to get survival and recruitment parameters out of that? This is where the magic happens.
+
+First we need to deal with Year 1, where we have no previous year's data to work with. In year 1 (or time step 1, whatever you want to call it), we will model the population's expected abundance ($\lambda$) from environmental covariates, just like we do with a simple N-mixture model or the independent form of the dynamic N-mixture model.
+
+\begin{gather*}
+\mathrm{log}(\lambda_{it}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
+    \beta_{\lambda 2} {Temp_{it}} \\
+    N_{it} \sim \mathrm{Poisson}(\lambda_{it})
+\end{gather*}    
+
+
+Next, we need to model apparent survival rate for each year at each site $\phi_{it}$ so that we can model apparent survival in terms of counts $S_{it}$. A logit link and a binomial distribution is a reasonable way to do this. We can add covariates too! 
+
+Continuing with the ovenbird example, we know that survival of adult birds is pretty high during the breeding season and predation of adult birds isn't too much of an issue. But since we're modeling apparent survival, we need to consider movement out of a site as well. We know ovenbirds can move away from sites as temperature changes, so we'll include temperature in our model for $\phi_{it}$. 
+
+\begin{gather*}
+  logit(\phi_{it}) = \beta_{\phi 0} + \beta_{\phi 1}Temp_{it} \\
+  S_{it} \sim \mathrm{Binomial}(N_{i(t-1)}, \phi_{it}) \\
+\end{gather*}
+
+Now let's model apparent recruitment. This includes both new animals born in the population and immigrants. Since apparent recruitment can be any positive number, we can model the expected rate with a log link and then use a poisson to draw an integer value for the number of new "recruits". Maybe we think temperature and elevation impact recruitment:
+
+\begin{gather*}
+log(\gamma_{it}) = \beta_{\gamma 0} + \beta_{\gamma 1}Elev_{i}+ \beta_{\gamma 2}Temp_{it}  \\
+G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}*\gamma_{it}) \\
+\end{gather*}
+
+
+Now we come back to that note I mentioned above. What happens if the previous year had no individuals at that site? In that case, we're drawing from a Poisson with $\lambda$ = 0, which means we aren't allowing for previously unoccupied sites to become occupied, which is probably not what we want. 
+
+A work around is to model expected recruitment using the expected abundance from the previous time step rather than the realized abundance. Instead of:
+\begin{gather*}
+G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}*\gamma_{it}) \\
+\end{gather*}
+
+We can use:
+\begin{gather*}
+G_{it} \sim \mathrm{Poisson}(\lambda_{i(t-1)}*\gamma_{it}) \\
+\end{gather*}
+
+This small change will help our model avoid getting "stuck" and will allow for more realistic changes from year to year across our sites. 
+
+Okay great! We have our state-process model all worked out, so let's put it all together. 
+
+\subsubsection{Putting it Together}
+Here's the full state process model in one go. 
+
+Year 1: 
+\begin{gather*}
+\mathrm{log}(\lambda_{it}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
+    \beta_{\lambda 2} {Temp_{it}} \\
+    N_{i1} \sim \mathrm{Poisson}(\lambda_{i1})
+\end{gather*}    
+
+Year > 1:
+\begin{gather*}
+  logit(\phi_{it}) = \beta_{\phi 0} + \beta_{\phi 1}Temp_{it} \\
+  S_{it} \sim \mathrm{Binomial}(N_{i(t-1)}, \phi_{it}) \\
+  log(\gamma_{it}) = \beta_{\gamma 0} + \beta_{\gamma 1}Elev_{i} + \beta_{\gamma 2}Temp_{it} \\
+  G_{it} \sim \mathrm{Poisson}(\lambda_{i(t-1)}*\gamma_{it}) \\
+  N_{it} = S_{it} + G_{it}
+\end{gather*}
+
+
+\subsubsection{Why This Works}
+One thing that can seem sort of suspicious about this whole model is that if feels like we're making up dynamics from data. Since we have no data on all these parameters specficially, how is this any different from the simple model we had before? Well, even if we don't know anything about what influences survival and recruitment of a species, we have some general ideas about how populations work in general. And in general, populations do not bounce around without reason from year to year. Remember how we've been using a Poisson distribution to go from expected abundance to realized abundance? The thing about a Poisson is that the mean is equal to the variance. So even though the expected (mean) population may not change much from year to year, the realized population can change dramatically! 
+
+By using the combination of a Poisson and a Binomial, the expected abundance of the population won't change dramatically but the variance (how much the realized abundance bounces around) will be much smaller. Plus it's just way more fun than the simple model :) 
+
+\section{Modeling Detection}
+
+We have a lot of options for modeling detection, just like we do with closed population N-mixture models. The only thing that really changes is the indexing of your model. I'm going to use a binomial N-mixture model for this example, because distance sampling can get a little messy, but I plan on doing a future tutorial specifically on distance sampling! We could also use a removal model framework and model what time period we first heard/saw/detected the bird in. Lots of options! 
+
+So for now, we'll imagine we didn't collect distance data, just counts per time period. As I mentioned in the intro, our point counts are performed for 10 minutes in 2.5 minute intervals. We also record what time of day we started the point count so we can use that as a covariate for detection. Notice that we could add in interval specific covariates if we had any.
+
+\begin{gather*}
+    logit(p_{it}) = \alpha_0 + \alpha_1 time_{it}\\
+    y_{ijt} \sim \mathrm{Binomial}(N_{it}, p_{it})
+  \end{gather*}
+  
+Our data $y_{ijt}$ is simply the counts of birds detected at site $i$ in time interval $j$ in year $t$. 
+
+
+\section{Coding the Model in JAGS}
+Alright, time to turn this math into code! For the purpose of the code I like to call lambda's beta's "psi", things relating to survival "phi" and recruitment betas "gamma" but you can call them whatever you want. 
+
+I've also stuck a uniform prior on all the beta coefficients. 
+
+\subsection{Simple Dynamic Model}
+
+For the simple model, the code is nice and straightforward. We can also add in a "derived parameter" of total abundance so we can see how the abundance of Ovenbirds is across all sites together. 
+
+```{r, echo = T}
+modelstring.birds.simple = "
+model {
+for (t in 1:n.years){
+  for (i in 1:n.sites){
+    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    N[i,t] ~ dpois(lambda[i,t]) 
+  
+    logit(p[i,t]) <- alpha.0 + alpha.1*Time[i,t]
+    for (j in 1:n.visit){
+        y[i,j,t] ~ dbin(p[i,t], N[i,t])
+      } #end j
+    }#end i 
+    Total.N[t] <- sum(N[1:n.sites,t])
+  } #end t
+
+psi.0 ~dunif(-3,3)
+psi.1 ~dunif(-3,3)
+psi.2 ~dunif(-3,3)
+alpha.0 ~dunif(-3,3)
+alpha.1 ~dunif(-3,3)
+}
+"
+```
+
+Short and sweet. 
+
+\subsection{Dail and Madsen (2011) Model}
+
+For the fancier model, we have to add in a few more terms. 
+
+```{r, echo = T}
+modelstring.birds.fancy = "
+model {
+for (i in 1:n.sites){
+  lambda[i,1] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,1])
+  N[i,1] ~ dpois(lambda[i,1]) #year 1
+  
+  for (t in 2:n.years){
+    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
+    S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
+    
+    log(gamma[i,t]) <- gamma.0 + gamma.1*Elev[i] + gamma.2*Temp[i,t]
+    G[i,t] ~ dpois(lambda[i,t-1]*gamma[i,t])
+    
+    N[i,t] <- S[i,t] + G[i,t]
+  } #end t
+  
+  for (t in 1:n.years){
+    logit(p[i,t]) <- alpha.0 + alpha.1*Time[i,t]
+    for (j in 1:n.visit){
+      y[i,j,t] ~ dbin(p[i,t], N[i,t])
+      } #end j
+    }#end t again
+  } #end i
+
+psi.0 ~dunif(-3,3)
+psi.1 ~dunif(-3,3)
+psi.2 ~dunif(-3,3)
+phi.0 ~ dunif(-4,3)
+phi.1 ~ dunif(-3,3)
+gamma.0 ~dunif(-3,3)
+gamma.1 ~dunif(-3,3)
+gamma.2 ~dunif(-3,3)
+alpha.0 ~dunif(-1,3)
+alpha.1 ~dunif(-3,3)
+
+for (t in 1:n.years){
+  Total.N[t] <- sum(N[,t])
+  }
+}
+"
+```
+
+\subsection{Data Cleanup}
+
+Before we can run these models, we'll need to get our data in order. Luckily for N-Mixture models the "data" is pretty straight forward. We'll need to give JAGS (or NIMBLE) the elevation,  temperature, and survey time covariates, the number of sites with data, the number of years of data we are analyzing and the number of birds we saw at each site in each time interval in each year. 
+
+Let's get to work.
+
+```{r}
+Covs <- read.csv("Site_Covs.csv")
+Dets <- read.csv("Site_Obs.csv")
+head(Dets, n =3)
+head(Covs, n = 3)
+```
+
+First we need to match up the surveyID with the point name, so we know when and where we saw each bird. We then want to filter our data so that we only keep the information on our example species, the Ovenbird (OVEN). Finally, we want to know how many birds were detected in each time interval (d1, d2, d3, d4 represent the distance the bird was detected in the 4 time intervals).
+
+```{r, echo =T}
+library(tidyr)
+library(dplyr)
+
+birds <- merge(Dets[Dets$species == "OVEN",], Covs, by = "surveyID", all.y = T)
+oven.detects <- birds %>% 
+    group_by(PointName, Year.y, stand_time, meanyeartemp, elevation, UTM.N, UTM.W) %>%
+      summarize(t1 = sum(d1 >= 0), t2 = sum(d2 >= 0), 
+                t3 = sum(d3 >= 0), t4 = sum(d4 >= 0)) %>%
+        replace_na(list(t1 =0, t2 = 0, t3 =0, t4 =0))
+head(oven.detects[order(oven.detects$PointName, oven.detects$Year.y),], n = 7)  
+```
+
+Now we just need to squish this data into the right format and grab the covariates. Our model needs the data in a 3-D matrix where rows = sites, columns = intervals and the 3rd dimension = years. I prefer a for-loop for this operation but you can do it however you want. 
+
+```{r, echo = T}
+oven.detects$st_temp <- scale(oven.detects$meanyeartemp) #standardize temp
+oven.detects$st_elev <- scale(oven.detects$elevation) #standardize elevation
+n.sites = length(unique(oven.detects$PointName)) #48 sites
+n.years = length(unique(oven.detects$Year.y)) #5 years
+st_Elev = array(NA, n.sites)
+st_Temp = array(NA, dim = c(n.sites, n.years))
+time = array(NA, dim = c(n.sites, n.years))
+y <- array(NA, dim = c(n.sites, 4, n.years))
+for (i in 1:nrow(oven.detects)){
+  s = as.numeric(oven.detects$PointName[i])
+  year = oven.detects$Year.y[i] - 2015 #first year = 2016
+  y[s,,year] <- as.numeric(oven.detects[i,c("t1", "t2", "t3","t4")])
+  st_Elev[s] <- oven.detects$st_elev[i]
+  st_Temp[s,year] <- oven.detects$st_temp[i]
+  time[s,year] <- oven.detects$stand_time[i]
+}
+```
+Yay, our data is organized and good to go! 
+
+\subsection{Runing the Simple Model}
+
+Initial values for the simple dynamic model are, well, simple. The only thing we need to provide to JAGS to get our model to run is values of N that are always larger than y - that is, we always make sure the abundance of birds is higher than the number detected - and some initial detection values. Beyond that we have pretty smooth sailing to run the model. 
+
+```{r, echo = T}
+library(runjags)
+params.birds.simple <- c("psi.0", "psi.1", "psi.2", 
+                         "alpha.0", "alpha.1", "Total.N")
+jd.birds <- list(y = y,
+                 Elev = st_Elev,
+                 Temp = st_Temp,
+                 Time = time,
+                 n.sites = n.sites,
+                 n.visit = 4,
+                 n.years = n.years)
+ji.birds.simple <- function(){list(
+  alpha.0 = runif(1, 0, 1),
+  alpha.1= runif(1),
+  N = apply(jd.birds$y, c(1,3), max)+2
+  )}
+
+jags.birds.simple <- run.jags(model = modelstring.birds.simple, 
+                       inits = ji.birds.simple,
+                     monitor = params.birds.simple, 
+                     data = jd.birds, n.chains = 3, burnin =  1000,
+                     sample = 4000, method = "parallel", silent.jags = T)
+simple.mod <- summary(jags.birds.simple)
+simple.mod
+```
+
+What do these results tell us? 
+
+From the estimates of psi, we can see that there may be a slight negative relationship with elevation and a positive relationship with temperature. Our detection was not greatly influenced by the time of day of the survey but there was maybe a slightly positive relationship between detection and time. And most importantly, we see an estimate of a decrease in population across all sites together. 
+
+Let's see what the fancier model tells us. 
+
+\subsection{Runing the Dail Madsen Model}
+Giving the model parameters and data is pretty easy, but initial values become a lot trickier under this model. 
+```{r, echo = T}
+params.birds.fancy <- c("psi.0", "psi.1", "psi.2", "phi.0", 
+                        "phi.1", "gamma.0", "gamma.1", "gamma.2", 
+                        "alpha.0", "alpha.1", "Total.N")
+jd.birds <- list(y = y,
+                 Elev = st_Elev,
+                 Temp = st_Temp,
+                 Time = time,
+                 n.sites = n.sites,
+                 n.visit = 4,
+                 n.years = n.years)
+```
+
+One way to go about doing it is to simulate some initial values that we know will at least let the model start running. They don't have to be reasonable end results, just anything that will help the model not run into issues where y (the observations) are larger than the sum of S+G. 
+
+First, try to make sensible values for year 1. This is the relevant part of the model:
+```{r, echo  = T, eval = F}
+  lambda[i,1] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,1])
+  N[i,1] ~ dpois(lambda[i,1]) 
+```  
+
+We can make up a random value for detection and a fake N to start with and use this as data to run a quick glm. I like to make detection really low to ensure N will be high enough. 
+```{r, echo = T}
+init.p <- .2
+init.N1 <- apply(y[,,1],1, max)/init.p
+coefs <- unname(glm(round(init.N1)~elevation + temp, 
+                    data = data.frame(init.N1 = init.N1, elevation = st_Elev, temp = st_Temp[,1]), 
+                    family = "poisson")$coefficients)
+coefs #intercept, betas 
+```
+
+Next we have to come up with reasonable values for gamma and phi. Again, here's the relevant part of the model:
+```{r, echo  = T, eval = F}
+    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
+    S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
+    
+    log(gamma[i,t]) <- gamma.0 + gamma.1*Elev[i] + gamma.2*Temp[i,t]
+    G[i,t] ~ dpois(lambda[i,t-1]*gamma[i,t])
+    
+    N[i,t] <- S[i,t] + G[i,t]
+```
+
+We can do this by simulating and checking that all $y$ values are less than or equal to $N$. Rather than trying it once, seeing if it works, trying again if it didn't, etc. we can just have our for-loop "break" once it finds a solution.
+
+```{r, echo = T}
+n.sim = 50
+N.sim <- S.sim <- G.sim <- array(NA, dim = c(n.sites, n.years, n.sim))
+phi0.sim <- phi1.sim <- gamma0.sim <- gamma1.sim <- gamma2.sim <- array(NA, dim = c(n.sim))
+phi.sim <- gamma.sim <- array(NA, dim = c(n.sites, n.years, n.sim))
+lambda.sim <- array(NA, dim = c(n.sites, n.sim))
+good <- array(NA, dim = c(n.years, n.sim))
+works <- array(NA, n.sim)
+```
+```{r, echo = T}
+for(q in 1:n.sim){
+  phi0.sim[q]<- runif(1,-2,2)
+  phi1.sim[q]<- runif(1,-1,1)
+  gamma0.sim[q]<- runif(1,-2,2)
+  gamma1.sim[q] <- runif(1,-1,1)
+  gamma2.sim[q] <- runif(1,-1,1)
+  
+for (i in 1:n.sites){
+    lambda.sim[i,q] <- exp(coefs[1] + coefs[2]*st_Elev[i]+coefs[3]*st_Temp[i,1])
+    N.sim[i,1,q] <- rpois(1, lambda.sim[i,q])
+    
+ for (t in 2:n.years){
+   phi.sim[i,t, q] <- plogis(phi0.sim[q] + phi1.sim[q]*st_Temp[i,t])
+   S.sim[i,t,q] <- rbinom(1, N.sim[i,t-1,q], phi.sim[i,t,q])
+   gamma.sim[i,t,q] <- exp(gamma0.sim[q] + gamma1.sim[q]*st_Elev[i] + gamma2.sim[q]*st_Temp[i,t])
+   G.sim[i,t,q] <- rpois(1, N.sim[i,t-1,q]*gamma.sim[i,t,q])
+   N.sim[i,t,q] <- S.sim[i,t,q] + G.sim[i,t,q]
+ } #end t
+} #end i
+for (t in 1:n.years){
+max.obs <- apply(y[,,t],1, max)
+good[t,q] <- sum(N.sim[,t,q] - max.obs > 0)
+}
+works[q] <- min(good[,q]) == n.sites
+if(is.na(works[q])) {works[q] <- FALSE} #deal with infinities 
+if(works[q] == TRUE){break} #if you find a workable init combo, stop looking
+} #end q
+works*1
+use <- which(works*1 == 1)
+```
+
+Once we have our "solution", we can use it to make our initial values list and send it to JAGS. Note that I've upped the burnin quite a bit on this one. The model will converge a lot slower than it did under the simple formulation. 
+
+```{r}
+ji.birds.fancy <- function() {
+  list(psi.0 = coefs[1],psi.1 = coefs[2], psi.2 = coefs[3],
+    phi.0 = phi0.sim[use], phi.1 = phi1.sim[use],
+    gamma.0 = gamma0.sim[use], gamma.1 = gamma1.sim[use], gamma.2 = gamma2.sim[use])}
+
+jags.birds.fancy <- run.jags(model = modelstring.birds.fancy, 
+                       inits = ji.birds.fancy,
+                     monitor = params.birds.fancy, 
+                     data = jd.birds, n.chains = 3, adapt = 2000, burnin =  15000,
+                     sample = 2000, method = "parallel", silent.jags = T)
+mod.fancy <- summary(jags.birds.fancy)
+mod.fancy
+```
+
+Okay, what have we learned from this model? (Note: It is also good practice to plot all these results and make sure we visually inspect the chains, but I didn't want this tutorial to be 100 pages.)
+
+The expected abundance has a slight negative relationship with both elevation and temperature. Estimated apparent survival also has a slight negative relationship with temperature. Estimated apparent recruitment has a negative relationship with elevation and a positive relationship with temperature. 
+
+Remember this is real data so there's a ton of noise and I don't know the "real answer" to the population dynamics. There's also some underlying dynamics in this population that aren't being addressed with this model - namely competition with some very ecologically similar species in the area - but for the most part this matches what we already knew about ovenbirds. Cool! 
+
+\section{Graphing the Results}
+
+Let's graph our results to get a better idea of what we found out. First, let's compare the population estimates from the two models with the observation data. 
+
+```{r}
+plot(2016:2020, simple.mod[6:10,2], type = "l", 
+     main = "Ovenbird Population Estimates", xlab = "Year", 
+     ylab = "Abundance", ylim = c(0,100), col = "blue")
+lines(2016:2020, simple.mod[6:10,1], lty =2, col = "blue")
+lines(2016:2020, simple.mod[6:10,3], lty =2, col = "blue")
+lines(2016:2020, mod.fancy[11:15,2], lty =1, col = "red")
+lines(2016:2020, mod.fancy[11:15,1], lty =2, col = "red")
+lines(2016:2020, mod.fancy[11:15,3], lty =2, col = "red")
+points(2016:2020, colSums(apply(jd.birds$y, c(1,3), max)), 
+       col = "black", pch = 19)
+legend("bottomleft", 
+       c("Simple Model", "Dynamic Model", "Observations"), 
+       col = c("blue", "red", "black"), 
+       lty = c(1,1,0), pch = c(0,0,19))
+```
+The two models produce very similar results! 
+
+How about a fun spatial plot? First we'll want to grab the estimates of N for each site and make a dataframe with the locations of each point count. 
+```{r}
+N.ests <- extend.jags(jags.birds.simple, 
+              add.monitor = "N", drop.monitor = params.birds.simple, 
+              burnin = 1000, sample = 5000)
+summary.N <- summary(N.ests)
+
+points <- distinct(oven.detects[,c("PointName", "UTM.N", "UTM.W")])
+
+abund <- data.frame(Abund = summary.N[,2],  #technically the median
+                         upperAbund =  summary.N[,3],
+                         lowerAbund =  summary.N[,1],
+                         Name = rep(points$PointName,n.years),
+                         UTM.N = rep(points$UTM.N, n.years),
+                         UTM.W = rep(points$UTM.W, n.years),
+                         year = rep(2016:2020, each = n.sites))
+
+```
+Now we just send to ggplot. Obviously you could adjust this graph to make it prettier or display other information as you saw fit.
+
+```{r}
+library(ggplot2)
+ggplot(abund, aes(x = UTM.W, y = UTM.N))+
+  geom_point(aes(col = Abund), size = 4)+
+  facet_wrap(~year)+
+  scale_color_gradient(low = 'white', high = 'blue4',limits = c(0, 10))+
+  theme_classic()+
+  ggtitle("Esimated OVEN Abundance 2016 - 2020 ")
+```
+
+Pretty neat! This model suggests that not only is abundance changing, the spatial density of ovenbirds is also changing over time. Neat! 
+
+\section{Coding the Model in NIMBLE}
+
+The switch to NIMBLE is pretty easy for these models. Let's take a look.
+
+\subsection{Simple Dynamic Model}
+
+Nothing in the meat of the model changes when we move over to NIMBLE.
+
+```{r switch to nimble, echo = T}
+library(nimble)
+nimblebirds.simple <-
+  nimbleCode({
+for (t in 1:n.years){
+  for (i in 1:n.sites){
+    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    N[i,t] ~ dpois(lambda[i,t]) 
+  
+    logit(p[i,t]) <- alpha.0 + alpha.1*Time[i,t]
+    for (j in 1:n.visit){
+        y[i,j,t] ~ dbin(p[i,t], N[i,t])
+      } #end j
+    }#end i 
+    Total.N[t] <- sum(N[1:n.sites,t])
+  } #end t
+
+psi.0 ~dunif(-3,3)
+psi.1 ~dunif(-3,3)
+psi.2 ~dunif(-3,3)
+alpha.0 ~dunif(-3,3)
+alpha.1 ~dunif(-3,3)
+})
+```
+
+Short and sweet. 
+
+\subsection{Dail and Madsen (2011) Model}
+
+The only real change is turning sum(N[,t]) into sum(N[1:n.sites,t]). No biggie. 
+
+```{r, echo = T}
+nimblebirds.fancy <-
+  nimbleCode({
+for (i in 1:n.sites){
+  lambda[i,1] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,1])
+  N[i,1] ~ dpois(lambda[i,1]) #year 1
+  
+  for (t in 2:n.years){
+    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
+    S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
+    
+    log(gamma[i,t]) <- gamma.0 + gamma.1*Elev[i] + gamma.2*Temp[i,t]
+    G[i,t] ~ dpois(lambda[i,t-1]*gamma[i,t])
+    
+    N[i,t] <- S[i,t] + G[i,t]
+  } #end t
+  
+  for (t in 1:n.years){
+    logit(p[i,t]) <- alpha.0 + alpha.1*Time[i,t]
+    for (j in 1:n.visit){
+      y[i,j,t] ~ dbin(p[i,t], N[i,t])
+      } #end j
+    }#end t again
+  } #end i
+
+psi.0 ~dunif(-3,3)
+psi.1 ~dunif(-3,3)
+psi.2 ~dunif(-3,3)
+phi.0 ~ dunif(-4,3)
+phi.1 ~ dunif(-3,3)
+gamma.0 ~dunif(-3,3)
+gamma.1 ~dunif(-3,3)
+gamma.2 ~dunif(-3,3)
+alpha.0 ~dunif(-1,3)
+alpha.1 ~dunif(-3,3)
+
+for (t in 1:n.years){
+  Total.N[t] <- sum(N[1:n.sites,t])
+  }
+})
+```
+
+\subsection{Runing the Simple Model}
+
+Just like with JAGS we'll want to get our data, initials, params, etc. in order. 
+
+```{r, echo = T}
+nc.simple <- list(n.sites = n.sites,
+                 n.visit = 4,
+                 n.years = n.years)
+nd.simple <- list(y = y,
+                 Elev = st_Elev,
+                 Temp = st_Temp,
+                 Time = time)
+np.simple <- c("psi.0", "psi.1", "psi.2", "alpha.0", "alpha.1", "Total.N")
+ni.simple <- list(
+  alpha.0 = runif(1, 0, 1),
+  alpha.1= runif(1),
+  N = apply(y, c(1,3), max)+2)
+```
+Send it to NIMBLE in parallel to save time
+```{r, echo = T}
+library(coda)
+library(parallel)
+cl <- makeCluster(3) 
+clusterExport(cl = cl, varlist = c("nc.simple", 
+              "nd.simple", "ni.simple", "np.simple", "nimblebirds.simple"))
+birds.out <- clusterEvalQ(cl = cl,{
+  library(nimble)
+  library(coda)
+prepbirds <- nimbleModel(code = nimblebirds.simple, constants = nc.simple, 
+                           data = nd.simple, inits = ni.simple) 
+mcmcbirds<- configureMCMC(prepbirds, monitors = np.simple, print = T )
+birdsMCMC <- buildMCMC(mcmcbirds) #actually build the code for those samplers
+Cmodel <- compileNimble(prepbirds) #compiling the model itself in C++; 
+Compbirds <- compileNimble(birdsMCMC, project = prepbirds) # compile the samplers next
+Compbirds$run(nburnin = 1000, niter = 8000) #if you run this in your console it will say "null".
+return(as.mcmc(as.matrix(Compbirds$mvSamples)))
+})
+birds.nimble.simple <- mcmc.list(birds.out)
+stopCluster(cl)
+```
+Let's make sure our model is converged. 
+
+```{r, echo = T}
+gelman.diag(birds.nimble.simple)$psrf
+plot(birds.nimble.simple)
+```
+
+Our results should be the same as with JAGS. 
+```{r, echo = T}
+summary(birds.nimble.simple)
+```
+
+\subsection{Runing the Dail Madsen Model}
+
+As with JAGS, the Dail Madsen model becomes a little trickier to run. Before we send the model to parallel computing, the only changes in our commands are in the initial and parameter objects. I'm using the same initials I used for the JAGS model. See the JAGS section for an explanation of how I got them. 
+```{r, echo = T}
+np.fancy <- c("psi.0", "psi.1", "psi.2", 
+              "phi.0", "phi.1", "gamma.0", "gamma.1", 
+              "gamma.2", "alpha.0", "alpha.1", "Total.N")
+nc.fancy <- list(n.sites = n.sites,
+                 n.visit = 4,
+                 n.years = n.years) #no change from simple
+nd.fancy  <- list(y = y,
+                 Elev = st_Elev,
+                 Temp = st_Temp,
+                 Time = time) #no change from simple
+
+ni.fancy <- list(psi.0 = coefs[1],psi.1 = coefs[2], psi.2 = coefs[3],
+    phi.0 = phi0.sim[use], phi.1 = phi1.sim[use],
+    gamma.0 = gamma0.sim[use], gamma.1 = gamma1.sim[use], gamma.2 = gamma2.sim[use])
+```
+Time to send it to NIMBLE! However, we have to do one more very important thing - we have to initialize all the S and G values for each year. 
+```{r}
+library(coda)
+library(parallel)
+cl <- makeCluster(3) 
+clusterExport(cl = cl, 
+    varlist = c("nc.fancy", "nd.fancy", "ni.fancy", 
+              "np.fancy", "nimblebirds.fancy"))
+birds.out <- clusterEvalQ(cl = cl,{
+  library(nimble)
+  library(coda)
+prepbirds <- nimbleModel(code = nimblebirds.fancy, constants = nc.fancy, 
+                           data = nd.fancy, inits = ni.fancy) 
+prepbirds$simulate("N[,1]") #calculate starting N from psi values
+prepbirds$calculate("lifted_lambda_oBi_comma_t_minus_1_cB_times_gamma_oBi_comma_t_cB_L9") 
+#calculate the lambda[i,t-1]*gamma[i,t] term for all i and t from the inits provided
+prepbirds$simulate("G") #simulate all the G terms from the inits provided
+prepbirds$simulate("S[,2]") #simulate second year S from newly calculated N[,1]
+prepbirds$calculate("N[,2]") #calculate S + G for year 2
+prepbirds$simulate("S[,3]") #simulate 3rd year S from newly calculated N[,2]
+prepbirds$calculate("N[,3]") #year 3
+prepbirds$simulate("S[,4]") # year 4
+prepbirds$calculate("N[,4]") #year 4
+prepbirds$simulate("S[,5]") #year 5
+prepbirds$calculate("N[,5]") # year 5
+mcmcbirds<- configureMCMC(prepbirds, monitors = np.fancy, print = T )
+birdsMCMC <- buildMCMC(mcmcbirds) #actually build the code for those samplers
+Cmodel <- compileNimble(prepbirds) #compiling the model itself in C++; 
+Compbirds <- compileNimble(birdsMCMC, project = prepbirds) # compile the samplers next
+Compbirds$run(nburnin = 20000, niter = 30000) #if you run this in your console it will say "null".
+return(as.mcmc(as.matrix(Compbirds$mvSamples)))
+})
+birds.nimble.fancy <- mcmc.list(birds.out)
+stopCluster(cl)
+```
+
+Check convergence (you would want to do this before you stop the cluster in case you needed to extend the run)
+
+```{r, echo = T}
+gelman.diag(birds.nimble.fancy)$psrf
+```
+
+And finally, check out the results. Our results should be the same as with JAGS. 
+```{r, echo = T}
+summary(birds.nimble.fancy)
+```
+
+\section{Final Notes}
+
+Dynamic N-mixture models are a really neat way to take simple data (counts) and learn a lot about population dynamics, but there's always way to improve your models! 
+For instance, in this example I used a binomial detection function, which really doesn't do a great job of capturing the true detection probability in our point counts. A way better method would be removal sampling (time-to-detection models) or distance sampling. Additionally, we didn't do any model selection in this example but if we were publishing this data we definitely would want to do that. So just remember, this is a cool model framework but take the results (especially the OVEN results shown here) with a grain of salt! 
+
+
+
+
