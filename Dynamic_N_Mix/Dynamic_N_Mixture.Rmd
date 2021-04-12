@@ -14,6 +14,7 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(fig.width = 8, collapse = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80), tidy=TRUE)
 library(coda)
 library(runjags)
 library(knitr)
@@ -105,9 +106,9 @@ So this is all well and good, you might say to yourself, but how does that relat
 First we need to deal with Year 1, where we have no previous year's data to work with. In year 1 (or time step 1, whatever you want to call it), we will model the population's expected abundance ($\lambda$) from environmental covariates, just like we do with a simple N-mixture model or the independent form of the dynamic N-mixture model.
 
 \begin{gather*}
-\mathrm{log}(\lambda_{it}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
-    \beta_{\lambda 2} {Temp_{it}} \\
-    N_{it} \sim \mathrm{Poisson}(\lambda_{it})
+\mathrm{log}(\lambda_{i1}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
+    \beta_{\lambda 2} {Temp_{i1}} \\
+    N_{i1} \sim \mathrm{Poisson}(\lambda_{i1})
 \end{gather*}    
 
 
@@ -124,7 +125,7 @@ Now let's model apparent recruitment. This includes both new animals born in the
 
 \begin{gather*}
 log(\gamma_{it}) = \beta_{\gamma 0} + \beta_{\gamma 1}Elev_{i}+ \beta_{\gamma 2}Temp_{it}  \\
-G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}*\gamma_{it}) \\
+G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}\gamma_{it}) \\
 \end{gather*}
 
 
@@ -132,12 +133,17 @@ Now we come back to that note I mentioned above. What happens if the previous ye
 
 A work around is to model expected recruitment using the expected abundance from the previous time step rather than the realized abundance. Instead of:
 \begin{gather*}
-G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}*\gamma_{it}) \\
+G_{it} \sim \mathrm{Poisson}(N_{i(t-1)}\gamma_{it}) \\
 \end{gather*}
 
 We can use:
 \begin{gather*}
-G_{it} \sim \mathrm{Poisson}(\lambda_{i(t-1)}*\gamma_{it}) \\
+G_{it} \sim \mathrm{Poisson}(\lambda_{i(t-1)}\gamma_{it}) \\
+\end{gather*}
+
+Of course, now we'll need a model for $\lambda_{it}$. Luckily we know that our expected population from year 1 was just a log-linear relationship to covariates, so our expected population in year 2 should just be that value*(recruitment + survival).
+\begin{gather*}
+\lambda_{it} = \lambda_{i(t-1)}\phi_{it}+\lambda_{i(t-1)}\gamma_{it} \\
 \end{gather*}
 
 This small change will help our model avoid getting "stuck" and will allow for more realistic changes from year to year across our sites. 
@@ -149,23 +155,24 @@ Here's the full state process model in one go.
 
 Year 1: 
 \begin{gather*}
-\mathrm{log}(\lambda_{it}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
-    \beta_{\lambda 2} {Temp_{it}} \\
+\mathrm{log}(\lambda_{i1}) = \beta_{\lambda 0} + \beta_{\lambda 1} {Elev_{i}} +
+    \beta_{\lambda 2} {Temp_{i1}} \\
     N_{i1} \sim \mathrm{Poisson}(\lambda_{i1})
 \end{gather*}    
 
 Year > 1:
 \begin{gather*}
   logit(\phi_{it}) = \beta_{\phi 0} + \beta_{\phi 1}Temp_{it} \\
-  S_{it} \sim \mathrm{Binomial}(N_{i(t-1)}, \phi_{it}) \\
   log(\gamma_{it}) = \beta_{\gamma 0} + \beta_{\gamma 1}Elev_{i} + \beta_{\gamma 2}Temp_{it} \\
+  \lambda_{it} = \lambda_{i(t-1)}\phi_{it}+\lambda_{i(t-1)}\gamma_{it}\\
+  S_{it} \sim \mathrm{Binomial}(N_{i(t-1)}, \phi_{it}) \\
   G_{it} \sim \mathrm{Poisson}(\lambda_{i(t-1)}*\gamma_{it}) \\
   N_{it} = S_{it} + G_{it}
 \end{gather*}
 
 
 \subsubsection{Why This Works}
-One thing that can seem sort of suspicious about this whole model is that if feels like we're making up dynamics from data. Since we have no data on all these parameters specficially, how is this any different from the simple model we had before? Well, even if we don't know anything about what influences survival and recruitment of a species, we have some general ideas about how populations work in general. And in general, populations do not bounce around without reason from year to year. Remember how we've been using a Poisson distribution to go from expected abundance to realized abundance? The thing about a Poisson is that the mean is equal to the variance. So even though the expected (mean) population may not change much from year to year, the realized population can change dramatically! 
+One thing that can seem sort of suspicious about this whole model is that if feels like we're making up dynamics from data. Since we have no data on all these parameters specifically, how is this any different from the simple model we had before? Well, even if we don't know anything about what influences survival and recruitment of a species, we have some general ideas about how populations work in general. And in general, populations do not bounce around without reason from year to year. Remember how we've been using a Poisson distribution to go from expected abundance to realized abundance? The thing about a Poisson is that the mean is equal to the variance. So even though the expected (mean) population may not change much from year to year, the realized population can change dramatically! 
 
 By using the combination of a Poisson and a Binomial, the expected abundance of the population won't change dramatically but the variance (how much the realized abundance bounces around) will be much smaller. Plus it's just way more fun than the simple model :) 
 
@@ -231,7 +238,8 @@ for (i in 1:n.sites){
   N[i,1] ~ dpois(lambda[i,1]) #year 1
   
   for (t in 2:n.years){
-    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    lambda[i,t] <- lambda[i,t-1]*phi[i,t] + lambda[i,t-1]*gamma[i,t]
+    
     logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
     S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
     
@@ -252,7 +260,7 @@ for (i in 1:n.sites){
 psi.0 ~dunif(-3,3)
 psi.1 ~dunif(-3,3)
 psi.2 ~dunif(-3,3)
-phi.0 ~ dunif(-4,3)
+phi.0 ~ dunif(-5,5)
 phi.1 ~ dunif(-3,3)
 gamma.0 ~dunif(-3,3)
 gamma.1 ~dunif(-3,3)
@@ -388,7 +396,7 @@ coefs #intercept, betas
 
 Next we have to come up with reasonable values for gamma and phi. Again, here's the relevant part of the model:
 ```{r, echo  = T, eval = F}
-    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    lambda[i,t] <- psi[i,t-1]*phi[i,t] + psi[i,t-1]*gamma[i,t]
     logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
     S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
     
@@ -425,7 +433,7 @@ for (i in 1:n.sites){
    phi.sim[i,t, q] <- plogis(phi0.sim[q] + phi1.sim[q]*st_Temp[i,t])
    S.sim[i,t,q] <- rbinom(1, N.sim[i,t-1,q], phi.sim[i,t,q])
    gamma.sim[i,t,q] <- exp(gamma0.sim[q] + gamma1.sim[q]*st_Elev[i] + gamma2.sim[q]*st_Temp[i,t])
-   G.sim[i,t,q] <- rpois(1, N.sim[i,t-1,q]*gamma.sim[i,t,q])
+   G.sim[i,t,q] <- rpois(1, N.sim[i,t-1,q]*gamma.sim[i,t,q]) #being lazy and using N.sim instead of lambda.sim for each year
    N.sim[i,t,q] <- S.sim[i,t,q] + G.sim[i,t,q]
  } #end t
 } #end i
@@ -516,7 +524,7 @@ ggplot(abund, aes(x = UTM.W, y = UTM.N))+
   ggtitle("Esimated OVEN Abundance 2016 - 2020 ")
 ```
 
-Pretty neat! This model suggests that not only is abundance changing, the spatial density of ovenbirds is also changing over time. Neat! 
+Pretty neat! This model suggests that not only is abundance changing, the spatial density of ovenbirds is also changing over time.
 
 \section{Coding the Model in NIMBLE}
 
@@ -565,7 +573,7 @@ for (i in 1:n.sites){
   N[i,1] ~ dpois(lambda[i,1]) #year 1
   
   for (t in 2:n.years){
-    lambda[i,t] <- exp(psi.0 + psi.1*Elev[i]+psi.2*Temp[i,t])
+    lambda[i,t] <- lambda[i,t-1]*phi[i,t] + lambda[i,t-1]*gamma[i,t]
     logit(phi[i,t]) <- phi.0 + phi.1*Temp[i,t] 
     S[i,t] ~ dbin(phi[i,t], N[i,t-1]) #probability then size
     
@@ -586,7 +594,7 @@ for (i in 1:n.sites){
 psi.0 ~dunif(-3,3)
 psi.1 ~dunif(-3,3)
 psi.2 ~dunif(-3,3)
-phi.0 ~ dunif(-4,3)
+phi.0 ~ dunif(-5,5)
 phi.1 ~ dunif(-3,3)
 gamma.0 ~dunif(-3,3)
 gamma.1 ~dunif(-3,3)
