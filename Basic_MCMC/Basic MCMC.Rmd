@@ -134,7 +134,7 @@ Awesome, that's getting there! The true value can be seen in black and the red v
 ```{r plot samples2}
 find.p <- binom.samp(start = .8, steps = 5000)
 plot(1:5000, find.p, type = "l", xlab = "Iteration", ylab = "P Value")
-hist(find.p, breaks = seq(0,1, by = .1), main = "Posterior Distribution")
+hist(find.p, breaks = seq(0,1, by = .05), main = "Posterior Distribution")
 abline(v = mean(find.p), col = "red")
 abline(v = .2, lty = 2, lwd = 2) #true value
 mean(find.p)
@@ -160,6 +160,11 @@ Instead of drawing new values from runif(1) let's draw them from a normal distri
 ```{r, echo = F}
 plot(seq(0,1, by = .001), dnorm(seq(0,1, by = .001), mean = .2, sd = .05), type = "l", ylab = "", xlab = "p")
 ```
+Since we have a prior there's another likelihood we need to consider here when we go about accepting or rejecting points. Not only do we want to maximize the likelihood that our data comes from the distribution with the parameters were suggesting, we also want to maximize the likelihood that the parameters themselves came from the prior distributions we're suggesting. So this means we want to know if our data is a good fit with the model we're suggesting (e.g. is .2 a good value of to match the data?) AND we want to know if the parameter we drew that make that model is a good fit with the prior (e.g. is .2 a likely value from our normal prior with mean =.2, sd = .05?).
+
+Side note - this is easiest to do on the log scale! So we'll switch over to the log scale. Note that new/old is now exp(new-old) because of how logs work.
+
+
 ```{r binom metro2}
 binom.samp2 <- function(start, steps){
    res <- array(NA, dim = steps) #make an empty array to hold results
@@ -167,7 +172,10 @@ binom.samp2 <- function(start, steps){
    res[1] <- p
    for (i in 2:steps){
    new.p <- rnorm(1, mean = .2, sd = .05) #propose a new point
-   alpha <- min(1,dbinom(4,20,new.p) / dbinom(4,20,p)) #acceptance prob
+   old.like <- dbinom(4,20,p, log = T) + dnorm(p, mean = .2, sd = .05, log = T) #likelihood + prior likelihood
+   new.like <- dbinom(4,20,new.p, log = T) + dnorm(new.p, mean = .2, sd = .05, log = T) 
+   
+   alpha <- min(1,exp(new.like - old.like)) #acceptance prob
    if(runif(1) < alpha)
      p <- new.p #if accepted, proposed value is new p
    res[i] <- p #record results
@@ -179,14 +187,46 @@ binom.samp2 <- function(start, steps){
 ```{r plot prior samples}
 find.p2 <- binom.samp2(start = .8, steps = 500)
 plot(1:500, find.p2, type = "l", xlab = "Iteration", ylab = "P Value")
-hist(find.p2, breaks = seq(0,1, by = .1), main = "Posterior Distribution")
+hist(find.p2, breaks = seq(0,1, by = .05), main = "Posterior Distribution")
 abline(v = mean(find.p2), col = "red")
 abline(v = .2, lty = 2, lwd = 2) #true value
 mean(find.p2)
 ```
 With this method we can see that our estimates are a lot more precise - about `r round(mean(find.p2), digits = 2)` (`r round(quantile(find.p2, c(.05, .95)), digits = 2) `).
 
-So now we see how we could estimate for a distribution that's pretty easy. Let's move on to a more complicated scenario. 
+Notice however that we could seriously run into errors here if we suggest a really bad strong prior. Let's say for whatever reason we ask our cousin Ed about the probability of success of this coin and he tells you it has a 80%-90% chance of success. Here's what happens if we use a restrictive uniform prior of $p \sim U(.8,.9)$
+
+```{r binom bad prior}
+binom.samp.bad <- function(start, steps){
+   res <- array(NA, dim = steps) #make an empty array to hold results
+   p <- start
+   res[1] <- p
+   for (i in 2:steps){
+   new.p <- runif(1, .8, .9) #propose a new point
+   old.like <- dbinom(4,20,p, log = T) + dunif(p, .8, .9, log = T) #likelihood + prior likelihood
+   new.like <- dbinom(4,20,new.p, log = T) + dunif(new.p, .8, .9, log = T) 
+   
+   alpha <- min(1,exp(new.like - old.like)) #acceptance prob
+   if(runif(1) < alpha)
+     p <- new.p #if accepted, proposed value is new p
+   res[i] <- p #record results
+   }
+   return(res)
+}
+```
+
+```{r plot bad prior samples}
+find.p3 <- binom.samp.bad(start = .8, steps = 4000)
+plot(1:4000, find.p3, type = "l", xlab = "Iteration", ylab = "P Value")
+hist(find.p3, breaks = seq(0,1, by = .05), main = "Posterior Distribution")
+abline(v = mean(find.p3), col = "red")
+abline(v = .2, lty = 2, lwd = 2) #true value
+mean(find.p3)
+```
+
+Even if we run this for a very long time, we won't get the answer we're looking for. We can tell something is wrong because the values are bumping up against p = 0.8. They "want" to be lower, but we told the model it could only use values between .8 and .9, so it's forced to stay between those bounds. 
+
+Let's move on to a more complicated scenario. 
 
 \section{Linear Regression and MCMC}
 
@@ -196,7 +236,7 @@ So our model is $weight = \beta_0 + \beta_1*heat+\epsilon$
 
 First let's make up some data and add a bit of error:
 ```{r}
-heat <- runif(50, min = 0, max = 15)
+heat <- runif(100, min = 0, max = 15)
 weight <- 1.5+2*heat+rnorm(50,mean = 0, sd = 2)
 ```
 Here's our data:
@@ -234,7 +274,7 @@ First, we need to see what weight values would be predicted if our starting valu
 ```{r}
 pred.weight.start <- beta0 + beta1*heat
 ```
-Remember that our model says that the expected values are going to follow a linear pattern with the residuals following a normal pattern. AKA, the exact values might not be directly on this linear regression but they should be evenly far away from it on either side. So we can ask R what the likelihood is of each of these values and then sum them all together to get the likelihood for the entire data set. Notice that we will do this as two parts - one for the likelihood that the data fits with the model params and one for the likelihood that the chosen values fit their distributions (their priors). 
+Remember that our model says that the expected values are going to follow a linear pattern with the residuals following a normal pattern. AKA, the exact values might not be directly on this linear regression but they should be evenly far away from it on either side. So we can ask R what the likelihood is of each of these values and then sum them all together to get the likelihood for the entire data set. Notice that once again will do this as two parts - one for the likelihood that the data fits with the model params and one for the likelihood that the chosen values fit their priors.
 
 ```{r}
 start.like.data <- sum(dnorm(weight, mean = pred.weight.start, sd = sd, log = T))
@@ -346,9 +386,9 @@ abline(h = 2, col = "blue", lty = 2)
 hist(samples.linear[,3], main = "Posterior Distribution")
 abline(v = 2, lty = 2, lwd = 2, col = "blue") #true value
 ```
-Awesome! We got some pretty good estimates there, so we could leave it at that, but you might notice that the chains seem to stay at certain values for a long time and don't really explore the space very well. If this were a large dataset and we had more parameters, this would take a really long time for us to get a reasonable answer. Let's see what happens when we adjust our priors from uniform to a normal for one of our paramters. 
+Awesome! We got some okay estimates there, so we could leave it at that, but you might notice that the chains seem to stay at certain values for a long time and don't really explore the space very well. If this were a large dataset and we had more parameters, this would take a really long time for us to get a reasonable answer. Let's see what happens when we adjust our priors from uniform to a normal for the beta parameters.
 
-We only have to adjust a few parts of the original function. First, when we draw proposed values we need to make sure we draw from the correct distributions. Next, we also want to calculate the likelihood of that value from the correct prior distribution. Let's just change the prior on beta1. I've marked the points in the function that changed with comments:
+We only have to adjust a few parts of the original function. First, when we draw proposed values we need to make sure we draw from the correct distributions. Next, we also want to calculate the likelihood of that value from the correct prior distribution. Let's change the priors on beta0 and beta1. I've marked the points in the function that changed with comments:
 
 ```{r lin samp 2}
 lin.samp.norms <- function(beta0, beta1, sd, steps){
@@ -358,21 +398,21 @@ lin.samp.norms <- function(beta0, beta1, sd, steps){
    sd <- sd
    res[1,] <- c(beta0, beta1, sd)
    for (i in 2:steps){
-   proposed.beta0 <- runif(1, -5, 5)
-   proposed.beta1 <- rnorm(1, mean = 2, sd = .25) #we changed this 
-   proposed.sd <- runif(1, .00005, 5)
+   proposed.beta0 <- rnorm(1, mean = 1.5, sd = .5) #we changed this 
+   proposed.beta1 <- rnorm(1, mean = 2, sd = .25) #we also changed this 
+   proposed.sd <- runif(1, 0, 5)
    
    pred.weight.1 <- beta0 + beta1*heat
    pred.like.data <- sum(dnorm(weight, mean = pred.weight.1, sd = sd, log = T))
-   beta0prior <- dunif(beta0, min=-5, max=5, log = T)
-   beta1prior <- dnorm(beta1, mean = 2, sd = .25, log = T) #so we have to change this
+   beta0prior <- dnorm(beta0, mean = 1.5, sd = .5, log = T) #so we have to change this
+   beta1prior <- dnorm(beta1, mean = 2, sd = .25, log = T) #and this
    sdprior <- dunif(sd, min=0, max=5, log = T)
    
    pred.like <- pred.like.data + beta0prior + beta1prior + sdprior #full current likelihood
    
    pred.weight.prop <- proposed.beta0 + proposed.beta1*heat
    proposed.like.data <- sum(dnorm(weight, mean = pred.weight.prop, sd = proposed.sd, log = T))
-   proposed.beta0prior = dunif(proposed.beta0, min=-5, max=5, log = T)
+   proposed.beta0prior = dnorm(proposed.beta0, mean = 1.5, sd = .5, log = T) #we need to change this
    proposed.beta1prior = dnorm(proposed.beta1, mean = 2, sd = .25, log = T) #we also have to change this
    proposed.sdprior = dunif(proposed.sd, min=0, max=5, log = T)
    
@@ -412,15 +452,20 @@ abline(h = 2, col = "blue", lty = 2)
 hist(samples.linear2[,3], main = "Posterior Distribution")
 abline(v = 2, lty = 2, lwd = 2, col = "blue") #true value
 ```
-Finally, we can compare the mean results of our beautiful MCMC efforts (both functions) with the true values we simulated. 
+Finally, we can compare the mean results of our beautiful MCMC efforts (both functions) with the true values we simulated. We can also quickly run an lm and see what that would give us.
+
+```{r}
+lm(weight~heat)
+```
 
 ```{r compare, echo = F}
 true <- c(1.5, 2, 2)
 uniform.m <- apply(samples.linear, 2, mean)
 
 norm <- apply(samples.linear2, 2, mean)
+lm <- c(lm(weight~heat)$coefficients, NA)
 
-d <- data.frame(True_Values = true, Uniform_priors = uniform.m, Normal_priors = norm)
+d <- data.frame(True_Values = true, Uniform_priors = uniform.m, Normal_priors = norm, Lm_function = lm)
 rownames(d) <- c("Beta0", "Beta1", "sd")
 d
 ```
