@@ -1,0 +1,702 @@
+---
+title: |
+  Distance Sampling is Nifty!
+author: |
+  Heather Gaya
+date: "March 18, 2022"
+output:
+  beamer_presentation:
+    highlight: tango
+    theme: default
+    includes:
+      in_header: preamble.tex 
+fig.align: center
+fontsize: 9pt
+---
+
+```{r, setup, include=FALSE}
+library(formatR)
+library(styler)
+library(jagsUI)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = 'styler')
+#knitr::opts_chunk$set(fig.width = 4.5, collapse = TRUE)
+#knitr::opts_chunk$set(fig.height = 2.5, collapse = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=40))
+library(knitr)
+library(runjags)
+library(nimble)
+library(coda)
+library(plotrix)
+```
+
+# What is Distance Sampling?
+
+ - We can never count every animal at a site, unless they are very very rare 
+ 
+ \vfill
+ 
+ - We know objects that are far away are harder to see than objects that are close by
+ 
+  
+ \vfill
+ 
+ 
+ - Distance sampling uses this idea to help us estimate abundance and density 
+  
+ \vfill
+
+
+# Distance Sampling Assumptions
+
+Distance sampling makes some key assumptions!
+
+\vfill
+
+- Animals are distributed independent of lines (or points)
+
+- On the line, detection is certain (100% detection at distance 0)
+
+- Distances are recorded correctly
+
+- Animals don't move before detection (and no double counting of individuals)
+
+ 
+
+# An Example
+
+Let's say we want to know abundance on a plot. Each dot is an animal.
+
+```{r, echo =F}
+set.seed(10)
+x <- runif(250, 0,1)
+y <- runif(250, 0,1)
+transects <- data.frame(xstart = seq(.1, .9, by = .2), ystart = 0, xend = seq(.1, .9, by = .2), yend = 1 )
+plot(x,y, main = "", xlab = "", ylab = "", xlim= c(-.1,1.1), ylim = c(-.1,1.1), pch = 19, cex = 1.1, xaxt = "n", yaxt = "n")
+```
+
+# An Example
+
+We want to have even coverage of the plot, so we put down some transects and have our observers walk (or fly, or boat, or drive, or whatever) on them
+
+```{r, echo =F}
+plot(x,y, main = "", xlab = "", ylab = "", xlim= c(-.1,1.1), ylim = c(-.1,1.1), pch = 19, cex = 1.1, xaxt = "n", yaxt = "n")
+segments(transects$xstart, transects$ystart, transects$xend, transects$yend)
+```
+
+```{r, echo = F,results = 'asis', fig.width= 7, fig.height= 5}
+#library(animation)
+set.seed(1)
+  # how many animals are there to detect?
+  # generate animals unformly over (0,1)x(0,1)
+  xy.dat <- data.frame(x = x, y = y)
+  # sort the points by y (bottom to top)
+  # this is the direction in which we go along the transect
+  xy.dat <- xy.dat[order(xy.dat$y),]
+  # give each point an id
+  xy.dat$id <- 1:(nrow(xy.dat))
+
+  # list of transects
+  n.transects <- nrow(transects)
+  # vector to hold indices of detected points
+  detected <- rep(FALSE,nrow(xy.dat))
+
+  # vector to hold histogram of distances
+  histdat <- c(0)
+
+  # loop over transects
+  k <- 0
+  for(tr.id in 1:n.transects){
+    # pick out the current transect
+    this.tr <- transects[tr.id,]
+    # calculate all distances to this transect first
+    ddist <- abs(this.tr$xstart[1]-xy.dat$x)
+    # loop over the possibly observed animals
+    for(j in seq_along(xy.dat[,1])){
+      # take this observation
+      obs <- xy.dat[j,]
+      sigma <- 0.02
+      this.detected <- (exp(-ddist[j]^2/(2*sigma^2)) > runif(1))
+      # maybe it was already detected? don't un-detect it!
+      detected[obs$id] <- detected[obs$id] | this.detected
+      # only do this animation stuff when we detect something
+      if(this.detected){
+        cat(paste0("# An Example \n"))
+        # plot whole study area and all "animals"
+        plot(xy.dat$x, xy.dat$y, xaxt = "n", yaxt = "n",
+             xlab="", ylab="",
+             main="",
+             xlim=c(-0.01,1.01), ylim=c(-0.01,1.01),
+             pch=20,cex=0.7,col=grey(0.7))
+        segments(transects$xstart, transects$ystart, transects$xend, transects$yend, col = "grey")
+        if(tr.id > 1){segments(transects$xstart[1:(tr.id-1)], transects$ystart[1:(tr.id-1)], transects$xend[1:(tr.id-1)], transects$yend[1:(tr.id-1)], col = "red")}
+
+        #lapply(transects[1:tr.id,],lines, lty=2, col="grey")
+        if(!is.null(detected)){
+          # plot the animals that have been detected so far in blue
+          points(xy.dat[detected,c("x","y")], pch=20,cex=0.7,col="blue")
+        }
+        # draw perpendicular line -- from transect to animal
+        lines(x = c(this.tr$xstart[1], obs[1]),
+              y = c(obs[2], obs[2]),col="red")
+        # add this observation to the histogram
+        histdat <- c(histdat,ddist[j])
+
+        # draw "along transect" line showing how far we come so far
+        lines(x=c(this.tr$xstart,this.tr$xend),y=c(this.tr$ystart[1],obs[2]),col="red")
+
+        ## update the histogram plot
+        xmax <- 3.5 * sigma
+        # hist(histdat,ylim=c(0,35),xlim=c(0,xmax),
+        #      main="Histogram of observed distances",xlab="Distance",
+        #      breaks=seq(0,xmax,len=10))
+        cat("\n\n---------------------\n\n")
+      } # end of detected stuff
+    } # end of current transect loop
+    cat(paste0("# An Example \n"))
+        # plot whole study area and all "animals"
+        plot(xy.dat$x, xy.dat$y, xaxt = "n", yaxt = "n",
+             xlab="", ylab="",
+             main="",
+             xlim=c(-0.01,1.01), ylim=c(-0.01,1.01),
+             pch=20,cex=0.7,col=grey(0.7))
+        segments(transects$xstart, transects$ystart, transects$xend, transects$yend, col = "grey")
+        segments(transects$xstart[1:tr.id], transects$ystart[1:tr.id], transects$xend[1:tr.id], transects$yend[1:tr.id], col = "red")
+        points(xy.dat[detected,c("x","y")], pch=20,cex=0.7,col="blue")
+        if(tr.id != n.transects){cat("\n\n---------------------\n\n")}
+  } # end loop over all transects
+```
+
+# An Example
+
+You'll notice this sample isn't random - we clearly found more animals near the transects than far away.
+
+```{r, echo =F}
+hist(histdat,ylim=c(0,25),xlim=c(0,xmax),
+             main="Histogram of Observed Distances",xlab="Distance",
+             breaks=seq(0,xmax,len=10))
+```
+
+# The Math
+
+If we can quantify this bias, we can estimate our "effective" search area, which gives us density.
+
+\begin{equation*}
+\begin{split}
+D & = \frac{n}{a} \\
+\\
+N & = DA
+\end{split}
+\end{equation*}
+
+where $n$ = number of animals in your searched area,
+
+$N$ = true abundance (derived),
+
+$A$ = total area of interest,
+
+and $a$ = effective area searched
+
+
+# The Math (Cont')
+
+How do we estimate this? Integrals!
+
+```{r, echo = F}
+
+#plot(c(0,1), col = "white", axes = F, xlab = "", ylab = "", ylim = c(0,1), xlim = c(0,1))
+#lines(c(.5,.5), c(0,1))
+xs <- seq(0,1, by = .01)
+p <- exp(-xs^2/(2*(.2)^2))
+plot(xs, p, type = "l", lwd = 2, ylab = "Probability of Detection", xlab = "Distance from Transect", ylim = c(0, 1.1))
+polygon(c(xs, 0), c(p, 0), col=rgb(red = 1, green = 0, blue =0, alpha = .5))
+arrows(.6,.6 , .3,.25, length = .1 )
+text(.65,.7, "Effective strip width")
+text(.65,.85, bquote(integral(e^(-x^2/(2*sigma^2)))), cex = 1.5)
+
+```
+
+# Alternative Math
+
+Alternatively, we can reformat the problem so that WE define the area and ask the model to tell us how many animals are in the area we choose. Our equation is now:
+
+\begin{equation*}
+D = \frac{N}{L(2W)}
+\end{equation*}
+
+where $N$ is the true abundance ($n$ + some unknown quantity of undetected animals)
+
+$L$ is the length of transects walked
+
+and $W$ is the width of interest (generally, 1/2 spacing between transects)
+
+
+# Distance Sampling - Gopher Tortoises!
+
+For my MS, we wanted to improve distance sampling techniques for Gopher Tortoise surveys throughout the Southeast.
+
+Tortoise burrows make great sedentary objects for distance sampling!
+
+\vfill
+
+\begin{figure}
+   \includegraphics[width=0.475\textwidth]{Adult.jpeg}
+   \hfill
+   \includegraphics[width=0.475\textwidth]{AdultBurrow.jpeg}
+\end{figure}
+
+# Even Clint Went Outside
+
+Burrows can range in size quite dramatically, so we also wanted to include the problem of size variation in our model.
+
+\vfill
+
+\begin{figure}
+   \includegraphics[width=0.475\textwidth]{tiny.jpeg}
+   \hfill
+   \includegraphics[width=0.475\textwidth]{clint.jpeg}
+\end{figure}
+
+# Gopher Tortoise Model Goals
+
+We needed our model to do (4) things:
+
+- Produce an accurate estimate of gopher tortoise abundance
+
+- Allow for burrow size to influence detection probability
+
+- Account for imperfect detection on the transect line
+
+- Incorporate size-dependent burrow occupancy
+
+
+# Formulating the Model
+\large
+Assuming some $M$ >> $N$:
+
+\begin{align*}
+{\color{blue} x_i} & \sim Uniform(0, {\color{teal}B}) & & \text{Distance to transect } \\
+{\color{blue} w_i} & \sim Bern({\color{red} \psi}) & & \text{Is this tortoise real?}\\
+{\color{red} \psi} & \sim Uniform(0, 1) & &\text{Only } \frac{N}{M} \text{ are real}\\
+{\color{red} N} & = \sum_{i = 1}^{{\color{teal}M}} {\color{blue} w_i} & &\text{Count up how many burrows are real} \\
+{\color{red}p_i} & = {\color{red}\xi_i} e^{\frac{-({\color{blue}x_i})^2}{2 {\color{red}\sigma_i}^2}} & & \text{Detection probability}\\
+ln({\color{red}\sigma_i}) & = {\color{red}\beta_0} + {\color{red}\beta_1}{\color{blue} z_i} & & \text{Detection depends on size of burrow} \\
+{\color{teal}y_i} & = Bern( {\color{red}p_i} {\color{blue}w_i}) & & \text{Was this burrow detected?} \\
+{\color{blue}o_i} & \sim Bern({\color{red}\theta_i}) & & \text{Was this burrow occupied?} \\
+logit({\color{red}\theta_i}) & = {\color{red}\alpha_0} + {\color{red}\alpha_1}{\color{blue} w_i} & & \text{smaller burrows more likely to  be occupied} \\
+{\color{red} N_{occ}} & = \sum_{i = 1}^{{\color{teal}M}} {\color{blue} w_io_i} & &\text{Count up tortoises} \\
+\end{align*}
+
+# Variation in Detection
+
+```{r, echo = F}
+xs <- seq(0,1, by = .01)
+p_1 <- exp(-xs^2/(2*(.3)^2))
+p_2 <- .8*exp(-xs^2/(2*(.2)^2))
+p_3 <- .5* exp(-xs^2/(2*(.05)^2))
+plot(xs, p_1, type = "l", lwd = 2, ylab = "Probability of Detection", xlab = "Distance from Transect", ylim = c(0, 1.1), cex.axis = 2, cex.lab = 1.65)
+lines(xs, p_2, col = "red")
+lines(xs, p_3, col = "blue")
+legend("topright",
+       legend = sapply(c(.3,.2,0.05), function(x) as.expression(substitute(sigma == B,list(B = as.name(x))))),
+      col = c("black", "red", "blue"), lty = 1, cex = 2)
+#x = .4
+points(c(.4, .4, .4), c(p_1[41],p_2[41], p_3[41]), pch = 19)
+arrows(.5,.7,.4, p_1[41], length = .1, lty = 2)
+text(.5,.8, "p(.4) = .41", cex = 2)
+```
+
+# Variation in Detection
+
+```{r, echo = F}
+plot(xs, p_1, type = "l", lwd = 2, ylab = "Probability of Detection", xlab = "Distance from Transect", ylim = c(0, 1.1), cex.axis = 2, cex.lab = 1.65)
+lines(xs, p_2, col = "red")
+lines(xs, p_3, col = "blue")
+legend("topright",
+       legend = sapply(c(.3,.2,0.05), function(x) as.expression(substitute(sigma == B,list(B = as.name(x))))),
+      col = c("black", "red", "blue"), lty = 1, cex = 2)
+#x = .4
+points(c(.4, .4, .4), c(p_1[41],p_2[41], p_3[41]), pch = 19)
+arrows(.5,.7,.4, p_1[41], length = .1, lty = 2)
+text(.5,.8, "p(.4) = .41", cex = 2)
+arrows(.5,.4,.4, p_2[41], length = .1, col = "red", lty = 2)
+text(.55,.45, "p(.4) = .11", col = "red", cex = 2)
+```
+
+# Variation in Detection
+
+```{r, echo = F}
+plot(xs, p_1, type = "l", lwd = 2, ylab = "Probability of Detection", xlab = "Distance from Transect", ylim = c(0, 1.1), cex.axis = 2, cex.lab = 1.65)
+lines(xs, p_2, col = "red")
+lines(xs, p_3, col = "blue")
+legend("topright",
+       legend = sapply(c(.3,.2,0.05), function(x) as.expression(substitute(sigma == B,list(B = as.name(x))))),
+      col = c("black", "red", "blue"), lty = 1, cex = 2)
+#x = .4
+points(c(.4, .4, .4), c(p_1[41],p_2[41], p_3[41]), pch = 19)
+arrows(.5,.7,.4, p_1[41], length = .1, lty = 2)
+text(.5,.8, "p(.4) = .41", cex = 2)
+arrows(.5,.4,.4, p_2[41], length = .1, col = "red", lty = 2)
+text(.55,.45, "p(.4) = .11", col = "red", cex = 2)
+arrows(.7,.2,.4, p_3[41], length = .1, col = "blue", lty = 2)
+text(.7,.25, "p(.4) = 0", col = "blue", cex = 2)
+```
+
+# Formulating the Model
+
+Two small problems:
+
+- How do we calculate detection on the line ($\xi_i$)?
+
+- What sizes ($z_i$) were the burrows we didn't see?
+
+
+\begin{figure}
+   \includegraphics{SizeDist.jpeg}
+\end{figure}
+
+
+# Imperfect Detection on the Line
+```{r, include = F}
+defOut <- knitr::knit_hooks$get("plot")  # save the default plot hook
+knitr::knit_hooks$set(plot = function(x, options) {  # set new plot hook ...
+  x <- defOut(x, options)  # first apply the default hook
+  if(!is.null(options$wrapfigure)) {  # then, if option wrapfigure is given ...
+    # create the new opening string for the wrapfigure environment ...
+    wf <- sprintf("\\begin{wrapfigure}{%s}{%g\\textwidth}", options$wrapfigure[[1]], options$wrapfigure[[2]])
+    x  <- gsub("\\begin{figure}", wf, x, fixed = T)  # and replace the default one with it.
+    x  <- gsub("{figure}", "{wrapfigure}", x, fixed = T)  # also replace the environment ending
+  }
+  return(x)
+})
+```
+\large
+Assuming a minimum burrow size of 4 cm wide and imperfect detection for all burrows $< b_{pt}$:
+\begin{align*}
+\xi_i & =
+\begin{cases}
+  \frac{1-b}{b_{pt}-4}(z_i-4) + b & 4 \leq z_i < b_{pt} \\
+  1 & z_i \geq b_{pt} \\
+\end{cases}
+\\
+b & \sim Uniform(0.2, 1) \\
+b_{pt} & \sim Uniform(15, 20)
+\end{align*}
+
+```{r, echo = F,out.width = ".75\\textwidth", fig.align="center", wrapfigure = list("R", .9)}
+plot(c(4, 20, 50), c(.2, 1, 1), lwd = 2, ylab = "Detection on the Line", xlab = "Size of Burrow", ylim = c(0, 1.1), cex.axis = 2, cex.lab = 1.65, type = "l", xlim = c(0, 50))
+abline(v = 4, lty = 2)
+text(2, .2, "b", cex = 2)
+text(20, 1.1, "bpt", cex = 2)
+points(c(4, 20),c(.2, 1), pch = 19)
+```
+
+# Dealing with Size
+
+This part is extra tricky. Here's what a tortoise population size distribution might look like:
+
+```{r, echo = F}
+xx <- seq(4,65, by = .1)
+a <- .8*dgamma(xx, shape = 70, rate = 1.6)
+b <- .45*dgamma(xx, shape = 10, rate = .7)
+c <- .3*dgamma(xx, shape = 27, rate = .9)
+d <- .4*dgamma(xx, shape = 75, rate = 1.6)
+plot(xx, a+b+c+d, type = "l", ylab = "", xlab = "Burrow Size", yaxt ="n", lwd =2)
+```
+
+# Dealing with Size
+
+We chose to model this as a mixture of an unknown number of gamma distributions.
+
+```{r, echo = F}
+a <- .8*dgamma(xx, shape = 70, rate = 1.6)
+b <- .45*dgamma(xx, shape = 10, rate = .7)
+c <- .3*dgamma(xx, shape = 27, rate = .9)
+d <- .4*dgamma(xx, shape = 75, rate = 1.6)
+plot(xx, a+b+c+d, type = "l", ylab = "", xlab = "Burrow Size", yaxt ="n", lwd = 2)
+lines(xx, a, col = "orange", lwd = 2)
+lines(xx, b, col = "blue", lwd = 2)
+lines(xx, c, col = "green", lwd = 2)
+lines(xx, d, col = "purple", lwd =2)
+```
+
+# Dealing with Size
+
+Each tortoise's size is drawn from a given gamma ($k$) with probability $p_k$.
+
+\begin{align*}
+P(z_i \in k) & \sim Dirichlet(\omega_1, \ldots, \omega_K) && \text{Choose a gamma} \\
+\omega_k & \sim Gamma(.001, .001) && \text{Uniformative prior for $\omega$} \\
+z_i & \sim Gamma(\alpha_k, \beta_k) && \text{Exact size depends on which gamma}
+\end{align*}
+
+# Model Summary
+
+\begin{figure}
+   \includegraphics{mod.jpeg}
+\end{figure}
+
+# Let's Put it in JAGS!
+\tiny
+*Note: full code w/ priors available on Github
+```{r, eval = F, echo = T}
+modelstring.Foo = "
+model
+{
+	for (i in 1:(nind +nz)) {
+		w[i] ~ dbern(psi)
+		x[i] ~ dunif(0,Bx)
+		z[i] ~ dgamma(a[i],c.beta[i])T(4,50)
+		a[i] <- shape[clust[i]]
+		c.beta[i] <- betaClust[clust[i]]
+    clust[i] ~ dcat( pClust[1:Nclust] )
+		sigma[i] <- exp(sigma.int+sigma.beta*z[i])
+		logp[i] <- -((x[i]*x[i])/(2*sigma[i]*sigma[i]))
+		p[i] <- exp(logp[i])*xi[i]
+		xi[i] <- ifelse(z[i] < b.point, m*z[i]+intercept, 1)
+		mu[i] <- w[i]*p[i]
+		y[i] ~ dbern(mu[i])
+    o[i]~ dbin(o2[i], 1)
+    logit(o2[i]) <- o.int + z.beta*z[i]
+    wo[i] <- o[i]*w[i]
+	}
+	intercept ~ dunif(.1,.8)
+	b.point <- 20
+	p.online <- m*4+intercept
+	m <- (1-intercept)/b.point
+
+	for (clustIdx in 1: Nclust) {
+		shape[clustIdx] ~ dunif(1,100)
+    betaClust[clustIdx] ~ dunif(.2,2)
+		}
+  pClust[1:Nclust] ~ ddirch(psizes)
+	psi~ dunif(0,1)			#exists or not
+	Nt <- sum(wo)
+	N <- sum(w)
+}
+"
+```
+
+# Side Note
+
+If we had ignored size variation and imperfect detection on the transect, our code would have been so much nicer...
+
+```{r, eval = F, echo = T}
+modelstring.Foo = "
+model
+{
+	for (i in 1:(nind +nz)) {
+		w[i] ~ dbern(psi)					# augmentation
+		x[i] ~ dunif(0,Bx)				# distances
+		logp[i] <- -((x[i]*x[i])/(2*sigma*sigma))
+		p[i] <- exp(logp[i])
+		mu[i] <- w[i]*p[i]
+		y[i] ~ dbern(mu[i])
+	}
+
+	sigma ~ dunif(0, 20)
+	psi~ dunif(0,1)			#exists or not
+
+	N <- sum(w)
+	D <- N/(2*L*Bx)			#burrow density
+}
+"
+```
+
+# Results
+
+\begin{figure}
+   \includegraphics[height=0.9\textheight]{Figure_Burrows.jpeg}
+\end{figure}
+
+# Results
+
+\begin{figure}
+   \includegraphics[height=0.9\textheight]{Figure_Burrows2.jpeg}
+\end{figure}
+
+# Making It More Complicated
+
+This model works great for including individual covariates like size. But what about environmental covariates that affect detection?
+
+\begin{figure}
+   \includegraphics{fire.jpeg}
+\end{figure}
+
+
+# Making It More Complicated
+
+Luckily, all we need to do is adjust our formula for $\sigma$ and choose a prior for vegetation ($v_i$).
+
+\begin{align*}
+{\color{red}p_i} & = {\color{red}\xi_i} e^{\frac{-({\color{blue}x_i})^2}{2 {\color{red}\sigma_i}^2}} & & \text{Detection probability}\\
+ln({\color{red}\sigma_i}) & = {\color{red}\beta_0} + {\color{red}\beta_1}{\color{blue} z_i}+ {\color{red}\beta_2}{\color{blue} v_i} & & \text{Detection depends on size + veg} \\
+{\color{teal}y_i} & = Bern( {\color{red}p_i} {\color{blue}w_i}) & & \text{Was this burrow detected?} \\
+{\color{blue} v_i} & \sim Beta(d,e) & & \text{Prior for vegetation}
+\end{align*}
+
+# Testing it Out
+
+In addition to simulation, we tested our new model on field data collected before and after prescribed burns.
+
+\begin{figure}
+   \includegraphics[height=0.8\textheight]{Veg3.jpeg}
+\end{figure}
+
+# Testing it Out
+
+\begin{figure}
+   \includegraphics[height=0.9\textheight]{Veg1.jpeg}
+\end{figure}
+
+# Testing it Out
+
+\begin{figure}
+   \includegraphics[height=0.9\textheight]{Veg2.jpeg}
+\end{figure}
+
+# Did we meet our goals?
+
+We were able to produce a model that accounted for all (5) objectives:
+
+- Produce an accurate estimate of gopher tortoise abundance
+
+- Allow for burrow size to influence detection probability
+
+- Account for imperfect detection on the transect line
+
+- Incorporate size-dependent burrow occupancy
+
+- Account for spatial heterogeneity in a detection covariate
+
+# Pet Interlude
+
+\begin{figure}
+   \includegraphics[width=0.22\textwidth]{Opal.jpeg}
+   \includegraphics[width=0.22\textwidth]{Cleo.jpeg}
+   \includegraphics[width=0.22\textwidth]{Perrin.jpeg}
+   \includegraphics[width=0.22\textwidth]{Arch.jpeg}
+\end{figure}
+
+
+# Current Bird Adventures
+
+In my PhD, we also use distance sampling - but for birds!  Instead of transects we use point counts. 
+\begin{figure}
+\centering
+\includegraphics[height=0.7\textheight]{cawa.jpeg}
+\end{figure}
+
+# Point Counts
+
+Assuming that birds are uniformly placed, the distance from the observer might look something like this:
+
+```{r, echo =F}
+set.seed(2)
+library(plotrix)
+x <- runif(500, -2, 2)
+y <- runif(500, -2, 2)
+dist <- sqrt((x)^2 + (y)^2)
+prob <- exp(-(dist^2)/(2*(.75^2)))
+det <- rbinom(length(x), 1, prob)
+seen.x <- x[det == 1]
+seen.y <- y[det == 1]
+seen.dist <- dist[det == 1]
+```
+```{r, echo =F, out.height= "75%"}
+hist(dist, breaks = seq(0,3, by = .25), main = "", freq = F, yaxt = "n", xlab = "", ylab = "", col = "skyblue", cex.axis = 2)
+```
+
+# Point Counts
+
+But the observed distance might look like this:
+```{r, echo = F, out.height= "75%"}
+hist(seen.dist, breaks = seq(0,3, by = .25), main = "", freq = F, yaxt = "n", xlab = "", ylab = "", col = "darkgreen", cex.axis = 2)
+```
+
+# Point Count Math
+
+For point count data, we need to account for the increasing probability of being at a given distance as you move away from the observer. For a half-normal detection curve:
+
+\begin{equation*}
+p = \int 2\pi e^{\frac{-x^2}{2\sigma^2}} dx
+\end{equation*}
+
+When you convert this into JAGS code, you split the integral into distance bins of equal width (10m, 20m, etc). Then you can use this fancy integration-avoidance trick:
+
+```{r, echo = T, eval = F}
+pbar <- ((pnorm(b[j+1], 0, tau) - pnorm(b[j], 0, tau)) /
+                  dnorm(0, 0, tau) / (b[j+1]-b[j]))*psi[j]
+```
+
+# Setup
+
+In the field, we perform point counts across our study site in North Carolina. The goal is to estimate the yearly abundance of all bird species present in the basin. 
+
+\includegraphics[height=0.75\textheight]{Site_Map.jpeg}
+
+# Protocol
+
+Instead of returning to these point counts multiple times, we combine distance sampling with time-to-first-detection methods to help us estimate detection. 
+\vfill
+
+Observers listen/look for birds for 10 minutes in 4 2.5-minute increments and record the estimated distance of each bird in each time period.
+
+\vfill
+
+This gives us 4 "visits" to work with - repeatability without all the effort! 
+
+\vfill
+
+During analysis, we run a dynamic N-mixture model (think Dail and Madsen 2011) to quantify the apparent survival, apparent emigration, and abundance of species at each site. 
+
+# Fun Math
+
+We group all detections into 10-m distance bins, $b$ and calculate all bin midpoints, $r_b$.The probability of a detection in distance bin $b$ with area $A_b$ for species $k$ at site $i$ in year $t$ is
+\begin{equation*}
+p_{iktb}^d = \frac{2\pi}{A_b} \int_{r_b}^{r_{b+1}} exp(\frac{-x^2_b}{2\sigma^2_{it}})dx
+\end{equation*}
+
+Yearly counts are then drawn from a binomial distribution given the latent site-abundance $N_{ikt}$, the availability probability (not described here), and the detection probability (distance + time-removal sampling). 
+
+\begin{align*}
+Dist_{ikt} & \sim Multi(\pi^d_{it1:10}, n_{ikt}) \\
+n_{ikt} & \sim Binomial(N_{ikt}, \sum p^a_{it1:4} \sum p_{ikt1:10}^d)
+\end{align*}
+
+
+# Results so far
+
+\includegraphics[height=0.75\textheight]{Abundance_All.jpeg}
+
+# Results so far
+
+\includegraphics[height=0.75\textheight]{Trailing_Predicted.jpeg}
+
+# Results so far
+
+\includegraphics[height=0.75\textheight]{Core_Predicted.jpeg}
+
+# Results so far
+
+\includegraphics[height=0.75\textheight]{SpeciesRichness.jpeg}
+
+# Questions?
+
+
+I probably ran out of time, but if not... questions?
+
+\vfill
+
+Feel free to email me at heather.gaya(@)uga.edu 
+
+\vfill
+Most of my code can be found at https://github.com/heathergaya or https://sites.google.com/view/heather-gaya/ 
+
+\vfill
+
+Also, while on the topic of self promotion, check out my LLC: https://www.hhecoanalytics.com/
+
+
+
+
