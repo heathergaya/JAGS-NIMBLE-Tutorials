@@ -1,0 +1,163 @@
+I had some trouble installing MARK and RMark on my new M1-chip Mac and thought I'd write out the steps that work for me. 
+
+Some (but not all) of them are the same as mentioned here:
+https://oliviergimenez.github.io/popdyn-workshop/tutorials/rmark-mac.html
+
+Step 1:  install RMark in R and load the library. 
+
+Step 2: Install Xcode if you don’t already have it 
+
+Step 3: Go to https://hpc.sourceforge.net/ and download the gcc and gfortran links that match your computer’s operating system. I am on Monterey so I will be using 12.1-m1 for all of mine. If you DON’T use Monterey, just make sure any time you see 12.1-m1 in my instructions that you switch it out for whatever you downloaded instead. 
+
+KEY STEP: Don’t open the zipfiles manually once downloaded. 
+
+Step 4: Open Terminal (and keep open until all is working)
+
+Step 5: Run the following code:
+
+    cd ~/Downloads
+    gunzip gfortran-12.1-m1-bin.tar.gz
+    gunzip gcc-12.1-m1-bin.tar.gz
+
+Step 6: Run the next two lines and don’t worry about the message that says “tar: Error exit delayed from previous errors”
+
+    sudo tar -xvf gfortran-12.1-m1-bin.tar -C / 
+    sudo tar -xvf gcc-12.1-m1-bin.tar -C /
+
+Step 7: Download MARK from here: http://www.phidot.org/software/mark/rmark/linux/ 
+
+Step 8: Unzip the download
+Step 9: Rename mark.64.osx to mark
+
+Step 10: Copy the renamed mark file to the hidden folder /usr/local/bin on your computer. This folder can be accessed by opening your Terminal and copy and pasting:
+
+    open -a Finder /usr/local/bin
+    
+    
+In a perfect world, you could then type mark into your terminal and you’d be done. Continue on if you have issues. 
+
+Part 2: Troubleshooting Attempt 1 (This helped, but not in the way I expected it to) 
+
+If you just got the error:
+
+Library not loaded: '/usr/local/gfortran/lib/libquadmath.0.dylib'
+  Referenced from: '/usr/local/bin/mark'
+  Reason: tried: '/usr/local/gfortran/lib/libquadmath.0.dylib' (no such file), '/usr/X11/lib/libquadmath.0.dylib' (no such file), '/usr/lib/libquadmath.0.dylib' (no such file), '/libquadmath.0.dylib' (no such file), '/libquadmath.0.dylib' (no such file)
+
+This is because the actual location of this file is: /usr/local/lib/libquadmath.0.dylib 
+But MARK expects it to be in: /usr/local/gfortran/lib/libquadmath.0.dylib
+
+So we need to link it. 
+
+Step 1: In Terminal, run: 
+    open -a Finder /usr/local
+
+Step 2: Create a new folder in this directory called “gfortran” and then another folder inside it called “lib”
+
+Step 3: In Terminal, run: 
+  
+  ln /usr/local/lib/libquadmath.0.dylib /usr/local/gfortran/lib/libquadmath.0.dylib
+  cd /usr/local/bin
+  mark
+
+If that works, yay! 
+
+Part 3: A different error that might (now) emerge is: 
+mach-o file, but is an incompatible architecture
+
+dyld[76654]: Library not loaded: '/usr/local/gfortran/lib/libquadmath.0.dylib'
+  Referenced from: '/usr/local/bin/mark'
+  Reason: tried: '/usr/local/gfortran/lib/libquadmath.0.dylib' (mach-o file, but is an incompatible architecture (have (arm64), need (x86_64))), '/usr/X11/lib/libquadmath.0.dylib' (no such file), '/usr/lib/libquadmath.0.dylib' (no such file), '/libquadmath.0.dylib' (no such file), '/libquadmath.0.dylib' (no such file)
+Abort trap: 6
+
+Step 1: in Terminal, we need reinstall gcc and gfortran via -x86_64 homebrew. To get homebrew (specifically -x86_64 home-brew):
+
+    arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+Step 2: In Terminal, run:
+
+    brew reinstall gcc
+    brew reinstall gfortran
+
+
+(If you get the error: “The following directories are not writable by your user”
+then run:
+    sudo chown -R $(whoami) /usr/local/bin /usr/local/include /usr/local/lib /usr/local/lib/pkgconfig /usr/local/share /usr/local/share/info /usr/local/share/man /usr/local/share/man/man1 /usr/local/share/man/man7
+
+    chmod u+w /usr/local/bin /usr/local/include /usr/local/lib /usr/local/lib/pkgconfig /usr/local/share /usr/local/share/info /usr/local/share/man /usr/local/share/man/man1 /usr/local/share/man/man7
+
+and try again
+)
+
+This process can take awhile. 
+
+Step 3: Run:
+
+    mdfind -name libquadmath.0.dylib 
+
+to find where libquadmath is stored. For me, it was in 
+    /usr/local/Cellar/gcc/12.2.0/lib/gcc/current/libquadmath.0.dylib
+
+Step 4: Re-link this to where MARK expects it to be:
+
+    ln /usr/local/Cellar/gcc/12.2.0/lib/gcc/current/libquadmath.0.dylib /usr/local/gfortran/lib/libquadmath.0.dylib
+
+Step 5: Uninstall mark (ridiculous, I know):
+
+    rm '/usr/local/bin/mark'
+    
+Step 6: Reinstall MARK (same process as before)
+
+check it’s in the right spot via the following terminal command:
+
+    which mark 
+
+(should spit out: /usr/local/bin/mark)
+
+Step 7: Try Running:
+mark
+
+You might get the “Permission denied” error, but just run:
+
+  chmod +x /usr/local/bin/mark 
+
+and (that) error will go away. Finally, we need to relink some folders.
+
+Step 8: Run:
+  open -a Finder /usr/local/opt/gcc/lib/gcc
+
+Step 9: In finder, create a folder called “10” inside the gcc folder.
+
+Step 10: In Terminal, run:
+    ln /usr/local/Cellar/gcc/12.2.0/lib/gcc/current/libquadmath.0.dylib /usr/local/opt/gcc/lib/gcc/10/libquadmath.0.dylib
+    arch -x86_64 zsh
+    brew install nvm   
+    mkdir ~/.nvm
+    echo "export NVM_DIR=~/.nvm\nsource \$(brew --prefix nvm)/nvm.sh" >> .zshrc
+    source ~/.zshrc
+
+
+Step 11: Run:
+    nvm install 16
+    nvm use 16
+    rm -rf node_modules
+
+Step 12: Check work. 
+When we run mark in terminal, we’ll finally get the answer:
+
+    No input file was specified, so MARK job is done.
+
+
+AND WE’RE FINALLY DONE
+
+
+
+
+
+
+
+
+
+
+
+
