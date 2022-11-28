@@ -1,0 +1,19 @@
+ 
+model {
+for (i in 1:n.sites) {
+  logit(psi[i]) <- psi.b0 + psi.b1*elevation[i]      
+  occ[i] ~ dbern(psi[i])
+
+  for (t in 1:6) {
+    logit(p[i,t]) <- p.b0 + p.b1*noise[i,t]
+    obs[i,t] ~ dbern(p[i,t] * occ[i])
+  } 
+}
+psi.b1 ~ dnorm(0, 0.37)
+psi.b0 ~ dnorm(0, 0.37) 
+p.b0 ~ dnorm(0, 0.37)
+p.b1 ~ dnorm(0, 0.37)
+
+totalocc <- sum(occ[])
+
+}

@@ -1,0 +1,39 @@
+model {
+
+ beta1 ~ dnorm(0, 0.5)
+ beta2 ~ dnorm(0, 0.5)
+ beta3 ~ dnorm(0, 0.5)
+ beta4 ~ dnorm(0, 0.5)
+ 
+
+ alpha1 ~ dnorm(0, 0.5)
+ alpha2 ~ dnorm(0, 0.5)
+ 
+ for (i in 1:nSites){
+   eps1[i] ~ dnorm(0, tau.alpha)    # Random site effects
+ }
+   
+ for (i in 1:nSites){
+   eps2[i] ~ dnorm(0, tau.alpha)    # Random site effects on detection
+   }
+tau.alpha <- 1/ (sd.alpha * sd.alpha)
+sd.alpha ~ dunif(0, 5)
+
+for(i in 1:nSites) {
+   log(lambda[i]) <- eps1[i] + beta1*Elvation[i] + beta2*observedAirTemp[i] + beta4*RH[i]
+   N[i] ~ dpois(lambda[i])         # Latent local abundance
+   log(sigma[i]) <- alpha1*cloud[i] + alpha2*wind[i] + eps2[i] ## detection model 
+   tau[i] <- 1/sigma[i]^2
+   for(j in 1:nBins) {
+     ## Trick to do integration for *point-transects*
+     pbar[i,j] <- (sigma[i]^2 * (1-exp(-b[j+1]^2/(2*sigma[i]^2))) -
+                   sigma[i]^2 * (1-exp(-b[j]^2/(2*sigma[i]^2)))) * 
+                  2*3.141593/area[j]
+     pi[i,j] <- psi[j]*pbar[i,j]
+   }
+      n[i] ~ dbin(sum(pi[i,]), N[i])
+   y[i,] ~ dmulti(pi[i,1:nBins]/sum(pi[i,]), n[i])
+}
+totalAbundance <- sum(N[1:nSites])
+
+}
