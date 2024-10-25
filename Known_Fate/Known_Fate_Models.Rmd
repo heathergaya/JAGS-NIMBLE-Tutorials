@@ -64,7 +64,7 @@ fake.data$ID = 1:100
 ran_sow <- runif(24, -1, 7)
 surv.prob <- matrix(NA, nrow = 100, ncol = 42)
 for(t in 2:42){
-surv.prob[,t] = plogis(.8 + .15*fake.data$sex -.19*(as.numeric(fake.data$color)-1) + .85*ran_sow[fake.data$Sow]+.05*t)
+surv.prob[,t] = plogis(.8 + .15*fake.data$sex -.19*(as.numeric(as.factor(fake.data$color))-1) + .85*ran_sow[fake.data$Sow]+.05*t)
 }
 z <- matrix(NA, nrow= 100, ncol = 42)
 last.day <- censor <- array(NA)
@@ -150,7 +150,7 @@ cap.dates <- seq(cap.dates[1],cap.dates[length(cap.dates)], by = 1)
 occs <- length(cap.dates)
 ```
 
-We end up with 1070 time periods, though obviously we don't have data for most of those. 
+We end up with 1112 time periods, though obviously we don't have data for most of those. 
 
 Now we can grab what time period each individual was born (first seen) and the last time period we observed them in. We also need to get our "capture history" for the individuals, which is just a matrix of their alive/dead state at any given time. If we know they are alive (first time period to the second-to-last time period), we know their live state = 1. If they are dead, their live state = 0. If we don't know, it is an NA. 
 
@@ -174,7 +174,7 @@ neos[1,]
 surv.caps[1,1:10]
 ```
 
-Lastly, we can standardize our continuous covariates and make sure all our categorial variables are numeric. 
+Lastly, we can standardize our continuous covariates and make sure all our categorical variables are numeric. 
 
 ```{r}
 neos$Sow_mass_s <- (neos$Sow_mass - mean(neos$Sow_mass)) / sd(neos$Sow_mass)
@@ -345,11 +345,15 @@ As for mass, we can see that the beta's CI crosses 0. This means that according 
 
 Let's look at another model option. Maybe the sex is important or maybe there's also a year effect. Sex will be a categorical, but we can have the two sexes draw their betas independently, as a fixed effect. We might want the years to be a random effect to control the variation between years. Remember that JAGS uses precision not sd in normal distributions.
 
+Note that below I've written beta.sex[1] as deterministic, not drawn from a distribution. Why? The reason is that if both beta.sex values come from distributions and beta0 is also unknown, the model will be overparameterized. No good! This is something to keep in mind when you have categorical fixed effects and intercepts together. A good rule of thumb is to always set one group of the fixed effects to 0 to avoid this issue. Or just get rid of the intercept. 
+
+(Special thanks to Dr. Frances Buderman for catching this error from a previous version of this tutorial.)
+
 ```{r, eval = F}
 modelstring.neos_sexyear = "
 model {
   
-  beta.sex[1] ~ dnorm(0, 1.5) #female
+  beta.sex[1] <- 0 #female
   beta.sex[2] ~ dnorm(0, 1.5) #male
   
   sigmaSow ~ dunif(0, .5)		# Random effect SD between 0 and .5
@@ -384,7 +388,7 @@ We can also ask JAGS to estimate the 42 day survival probability for each sex fo
 modelstring.neos_sexyear = "
 model {
   
-  beta.sex[1] ~ dnorm(0, 1.5) #female
+  beta.sex[1] <- 0 #female
   beta.sex[2] ~ dnorm(0, 1.5) #male
   
   sigmaSow ~ dunif(0, .5)		# Random effect SD between 0 and .5
@@ -430,7 +434,7 @@ jd <- list(n.ind= nrow(neos), y = surv.caps, first = first,
            last = last, sex = neos$sex, n.years = 3, 
            year = neos$year-2016, sow = neos$Sow_numeric, 
            n.sow = n.sow) 
-ji <- function(){list(beta0 = .5, beta.sex = runif(2), beta.year = runif(3))}
+ji <- function(){list(beta0 = .5, beta.sex = c(NA, runif(1)), beta.year = runif(3))}
 jp <- c("beta0","mean.phi.female", "beta.year",
         "mean.phi.male", "male_42", "female_42" , 
         "beta.sex", "loglike", "beta.Sow")
@@ -452,7 +456,7 @@ summary(piggies.sexyear$mcmc[,c("beta0","mean.phi.female[1,1]", "mean.phi.male[1
             "beta.year[1]", "beta.year[2]", "beta.year[3]"),])
 ```
 
-So what do these results tell us? Firstly, if you were born in year 2, your survival chances are probably lower than piglets born in other years (based on the beta.year estimates). Secondly there is some evidence of higher survival for male piglets (beta.sex[2] is larger than beta.sex[1]) but not much of a difference between sexes. 
+So what do these results tell us? Firstly, if you were born in year 2, your survival chances are probably lower than piglets born in other years (based on the median beta.year estimates). Secondly there is some evidence of lower survival for male piglets (the median of beta.sex[2] is less than 0) but not much of a difference between sexes and the CI crosses 0.
 
 Let's look at one last model - dealing with survival changing as piglets age. 
 
@@ -533,9 +537,9 @@ calc.waic <- function(x){
   vars <- grep("loglike", colnames(x$mcmc[[1]])) 
   #find the output that relates to loglike
   like <- as.matrix(x$mcmc[,vars,]) 
-  fbar <- colMeans(exp(like)) #mean likelihood 
+  fbar <- colMeans(like) #mean log-likelihood 
   Pw <- sum(apply(like,2,var)) #mean variance in log-likelihood 
-  WAIC<- -2*sum(log(fbar))+2*Pw
+  WAIC<- -2*sum(fbar)+2*Pw
   return(WAIC)
 }
 ```
@@ -647,9 +651,7 @@ Awesome!
 
 Running known fate models in NIMBLE is actually not that different from running them in JAGS. BUT you can do run more of them much more efficiently. For one thing, because you can run a model with multiple datasets without having to re-compile the model, you can write just one big model with all your covariates and then turn the covariates on and off for each model run. This is a HUGE time saver. Technically you could do this in JAGS to, but it wouldn't save you any time except for the physical typing part. 
 
-So first, let's build our big model with all the covariates in it. In NIMBLE we can ask it to calculate WAIC for us, but with the latest NIMBLE update (v 0.10.1), the built in function requires that we monitor "y". That's not always ideal, so I'm going to just do the calculations myself. 
-
-A note about calculating WAIC in NIMBLE - you can use R functions!! logdensity.binom only exists in JAGS, so instead we'll use the function "dbinom" from R. 
+So first, let's build our big model with all the covariates in it. Remember that in NIMBLE we can ask it to calculate WAIC for us, plus we can use sd or precision in our normal distributions! 
 
 ```{r, eval = F, echo = T}
 piggies.all <- nimbleCode({
@@ -661,7 +663,7 @@ for(k in 1:n.sow){
 }
   
   #sex effects
-  beta.sex[1] ~ dnorm(0, sd = .5) #female
+  beta.sex[1] <- 0 #female
   beta.sex[2] ~ dnorm(0, sd= .5) #male
   
   
@@ -679,7 +681,6 @@ for (i in 1:n.ind){
     beta.year[year[i]]+beta.mass*mass[i]
     mu[i,t] <- phi[i,t]*y[i,t-1]
     y[i,t] ~dbern(mu[i,t])
-    loglike[i,t] <- dbinom(y[i,t], 1, mu[i,t], log = T) #for WAIC
   }
 }
 beta0 ~ dunif(-6,6)
@@ -699,7 +700,7 @@ for(k in 1:n.sow){
 }
   
   #sex effects
-  beta.sex[1] ~ dnorm(0, sd = .5) #female
+  beta.sex[1] <- 0 #female
   beta.sex[2] ~ dnorm(0, sd= .5) #male
   
   
@@ -719,7 +720,6 @@ for (i in 1:n.ind){
   
     mu[i,t] <- phi[i,t]*y[i,t-1]
     y[i,t] ~dbern(mu[i,t])
-    loglike[i,t] <- dbinom(y[i,t], 1, mu[i,t], log = TRUE) #for WAIC
   }
 }
 beta0 ~ dunif(-6,6)
@@ -729,10 +729,10 @@ beta.mass ~ dnorm(0,sd = .25) #constrain to avoid difficulties with convergence
 ```
 We could also write derived params into our model and just use the same switches that we use to turn covariates on and off, but I'll skip that for now. 
 
-Next we can get our data, inits and params ready to go to run our model. First we'll run the null model but everything except the "on" vector in data will be the same for all runs. \subsection{Intercept Only}
+Next we can get our data, inits and params ready to go to run our model. First we'll run the null model but everything except the "on" vector in data will be the same for all runs. 
+\subsection{Intercept Only}
 ```{r}
-n.sow = length(unique(neos$Sow))
-n.params <- c("beta0", "beta.Sow","beta.age", "beta.sex", "beta.year", "beta.mass", "loglike") 
+n.params <- c("beta0", "beta.Sow","beta.age", "beta.sex", "beta.year", "beta.mass") 
 n.constants <- list(n.ind= nrow(neos), first = first,
                     last = last, sow = neos$Sow_numeric,
                     n.sow = n.sow, mass= neos$mass_s, 
@@ -740,7 +740,7 @@ n.constants <- list(n.ind= nrow(neos), first = first,
                     sex = neos$sex, n.years = 3)
 n.data <- list(y = surv.caps, on = c(0,0,0,0,0))
 n.inits <- list(beta0 = runif(1), beta.age = runif(1), beta.mass = runif(1), 
-                beta.Sow = runif(n.sow), beta.sex = runif(2), sigmayear = runif(1),
+                beta.Sow = runif(n.sow), beta.sex = c(NA, runif(1)), sigmayear = runif(1),
                 sigmaSow = runif(1))
 ```
 
@@ -753,9 +753,7 @@ preppigs <- nimbleModel(code = piggies.all,
                         inits = n.inits)
 preppigs$initializeInfo()
 ```
-First up we'll notice this big scary notification that "Model includes deterministic assignment using '<-' of the result of a density ('d') or simulation ('r') calculation. This is likely not what you intended in:". Except, this is what we intended. So we will ignore it. 
-
-We also seem to be missing some values that we'll want to initialize. First we'll have NIMBLE find values for beta.year, then we'll have it follow through with those values to initialize phi and mu. Note that y will always have some NA's - those are all the times the piglets weren't born or we weren't following them around. 
+Hmm, we seem to be missing some values that we'll want to initialize. First we'll have NIMBLE find values for beta.year, then we'll have it follow through with those values to initialize phi and mu. Note that y will always have some NA's - those are all the times the piglets weren't born or we weren't following them around. 
 
 ```{r}
 preppigs$simulate("beta.year")
@@ -765,16 +763,10 @@ preppigs$calculate("mu")
 
 Notice if we run initializeinfo() again, we'll still have NA's. This is because phi and mu are also unknown for large quantities of time in our model. That's okay! We don't need to know them at every step because they aren't relevant. 
 
-Onwards to the other parts of the model. Note that if we wanted to use the built in WAIC function, we would need to add "y" to our params list and add "enableWAIC = T".
-```{r, eval = F}
-n.params <- c(n.params[-"loglike"], "y")
-mcmcpigs <- configureMCMC(preppigs, monitors = n.params, print = T, enableWAIC = T)
-```
-
-Instead, we will just calculate WAIC ourselves at the end. 
+Onwards to the other parts of the model. Make sure to add "enableWAIC = T"
 
 ```{r}
-mcmcpigs <- configureMCMC(preppigs, monitors = n.params, print = T)
+mcmcpigs <- configureMCMC(preppigs, monitors = n.params, print = T, enableWAIC = TRUE)
 pigsMCMC <- buildMCMC(mcmcpigs)
 Cmodel <- compileNimble(preppigs)
 Comppigs <- compileNimble(pigsMCMC, project = preppigs)
@@ -782,18 +774,14 @@ Comppigs$run(niter = 1000, nburnin = 500)
 ```
 In a minute we'll run this in parallel, but for now we're just doing some test chains to make sure everything is working. Let see what we get out:
 ```{r}
-as.mcmc(as.matrix(Comppigs$mvSamples))[1:5, 29:32]
+tail(as.mcmc(as.matrix(Comppigs$mvSamples))) #many variables available to look at
 ```
-Looks fairly reasonable! It might seem like beta.year is bouncing around a lot but remember because we "turned off" all the covariates, the only relevant one is beta0. 
+A lot of output! But remember because we "turned off" all the covariates, the only relevant one is beta0.
 
-If we had used the internal WAIC feature, we could use this method to extract:
-```{r, eval = F, echo = T}
-Comppigs$calculateWAIC()
+To get our WAIC out, we can use this method:
+```{r, eval = F}
+Comppigs$getWAIC()
 ```
-
-But we did not, so we'll have to use the same method we used in JAGS. We can wait to calculate that till we have a full run of the model.
-
-
 Excellent. Let's try a full run of this model now with 3 chains. 
 
 ```{r}
@@ -810,22 +798,23 @@ nimblepigs.null <- clusterEvalQ(cl = cl, {
   preppigs$simulate("beta.year")
   preppigs$calculate("phi")
   preppigs$calculate("mu")
-  mcmcpigs <- configureMCMC(preppigs, monitors = n.params)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
   pigsMCMC <- buildMCMC(mcmcpigs)
   Cmodel <- compileNimble(preppigs)
   Comppigs <- compileNimble(pigsMCMC, project = preppigs)
-  Comppigs$run(niter = 3000, nburnin = 2000)
-  return(as.mcmc(as.matrix(Comppigs$mvSamples)))
+  Comppigs$run(niter = 1000, nburnin = 500)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), 
+              waic = Comppigs$getWAIC()))
 })
 ```
 
 Let's check a few of our results
 ```{r}
-library(coda)
-null.outputs <- mcmc.list(nimblepigs.null)
+null.outputs <- mcmc.list(nimblepigs.null[[1]]$outs, 
+                          nimblepigs.null[[2]]$outs, 
+                          nimblepigs.null[[3]]$outs)
 plot(null.outputs[,"beta0",])
 summary(null.outputs[,"beta0"])
-gelman.diag(null.outputs[,"beta0",])
 ```
 
 Awesome! Results look about the same for our null model as they did in JAGS. We will grab out WAIC values at the end, much like we did in JAGS.
@@ -838,24 +827,26 @@ Without closing the cluster we made for the null model, we can just change the v
 ```{r}
 nimblepigs.Sow <- clusterEvalQ(cl = cl, {
  preppigs$on <- c(1,0,0,0,1)
-  mcmcpigs <- configureMCMC(preppigs, monitors = n.params)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
   pigsMCMC <- buildMCMC(mcmcpigs)
   Cmodel <- compileNimble(preppigs)
   Comppigs <- compileNimble(pigsMCMC, project = preppigs)
-  Comppigs$run(niter = 3000, nburnin = 2000)
-  return(as.mcmc(as.matrix(Comppigs$mvSamples)))
+  Comppigs$run(niter = 1000, nburnin = 500)
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), waic = Comppigs$getWAIC()))
 })
 ```
 
 Excellent, let's evaluate our results.
 ```{r}
-Sow.outputs <- mcmc.list(nimblepigs.Sow)
+Sow.outputs <- mcmc.list(nimblepigs.Sow[[1]]$outs, 
+                         nimblepigs.Sow[[2]]$outs, 
+                         nimblepigs.Sow[[3]]$outs)
 plot(Sow.outputs[,c("beta0", "beta.Sow[1]", "beta.mass"),])
 summary(Sow.outputs[,c("beta0", "beta.Sow[1]", 
                        "beta.Sow[2]", "beta.mass"),])
 ```
 
-No surprise, the results are basically the same as we got from JAGS. 
+No surprise, the results are basically the same as we got from JAGS. (Also, yes, we needed to run these chains for longer.) 
 
 \subsection{Random + Fixed Effects}
 Next comes our year model, which has sex, sow and year in it but does not have mass. This means we need to turn on switches 1, 3, and 4 but turn off all the others. 
@@ -863,17 +854,20 @@ Next comes our year model, which has sex, sow and year in it but does not have m
 ```{r}
 nimblepigs.sexyear <- clusterEvalQ(cl = cl, {
  preppigs$on <- c(1,0,1,1,0)
-  mcmcpigs <- configureMCMC(preppigs, monitors = n.params)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
   pigsMCMC <- buildMCMC(mcmcpigs)
   Cmodel <- compileNimble(preppigs)
   Comppigs <- compileNimble(pigsMCMC, project = preppigs)
   Comppigs$run(niter = 3000, nburnin = 2000)
-  return(as.mcmc(as.matrix(Comppigs$mvSamples)))
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)), 
+              waic = Comppigs$getWAIC()))
 })
 ```
 
 ```{r}
-sexyear.outputs <- mcmc.list(nimblepigs.sexyear)
+sexyear.outputs <- mcmc.list(nimblepigs.sexyear[[1]]$outs, 
+                             nimblepigs.sexyear[[2]]$outs, 
+                             nimblepigs.sexyear[[3]]$outs)
 plot(sexyear.outputs[,c("beta0", "beta.Sow[1]", 
                         "beta.year[1]","beta.sex[1]", 
                         "beta.sex[2]"),])
@@ -892,17 +886,20 @@ This model only includes an intercept, sow and age.
 ```{r}
 nimblepigs.SowAge <- clusterEvalQ(cl = cl, {
  preppigs$on <- c(1,1,0,0,0)
-  mcmcpigs <- configureMCMC(preppigs, monitors = n.params)
+  mcmcpigs <- configureMCMC(preppigs, monitors = n.params, enableWAIC = T)
   pigsMCMC <- buildMCMC(mcmcpigs)
   Cmodel <- compileNimble(preppigs)
   Comppigs <- compileNimble(pigsMCMC, project = preppigs)
   Comppigs$run(niter = 3000, nburnin = 2000)
-  return(as.mcmc(as.matrix(Comppigs$mvSamples)))
+  return(list(outs = as.mcmc(as.matrix(Comppigs$mvSamples)),
+              waic = Comppigs$getWAIC()))
 })
 ```
 
 ```{r}
-sowage.outputs <- mcmc.list(nimblepigs.SowAge)
+sowage.outputs <- mcmc.list(nimblepigs.SowAge[[1]]$outs, 
+                            nimblepigs.SowAge[[2]]$outs, 
+                            nimblepigs.SowAge[[3]]$outs)
 plot(sowage.outputs[,c("beta0", "beta.Sow[1]", "beta.age"),])
 summary(sowage.outputs[,c("beta0", "beta.Sow[1]", 
                           "beta.Sow[2]","beta.age"),])
@@ -913,25 +910,18 @@ Time for the WAIC table!
 
 \subsection{WAIC Table}
 
-We can use similar code to what we did with JAGS to collect our model WAICs.
+We can use similar code to collect our model WAICs, but this time the WAIC scores themselves are calculated which saves us some time. This is not as clean a code as the one we can use for JAGS, but it gets the job done. 
 ```{r}
 nim.models <- mget(ls()[grep("nimblepigs", ls())]) #grabs all models in your environment!
-calc.waic.nim <- function(x){
-  vars <- grep("loglike", colnames(x[[1]])) 
-  like <- as.matrix(x[,vars])
-  like <- na.omit(like) #sometimes the first iteration is NA
-  fbar <- colMeans(exp(like)) #mean likelihood 
-  Pw <- sum(apply(like,2,var)) #mean variance in log-likelihood 
-  WAIC<- -2*sum(log(fbar))+2*Pw
-  return(WAIC)
-}
-#empty data frame
+```
+```{r}
 WAIC_nim <- data.frame(modname = ls()[grep("nimblepigs", ls())],
                        WAIC = rep(NA, length(nim.models)))
 
-#run the WAIC code for each model 
 for(i in 1:length(nim.models)){
-WAIC_nim[i,2] <-  calc.waic.nim(mcmc.list(nim.models[[i]]))
+WAIC_nim[i,2] <-  mean(unlist(nim.models[[i]],F)[[2]]$WAIC,
+                       unlist(nim.models[[i]],F)[[4]]$WAIC,
+                       unlist(nim.models[[i]],F)[[6]]$WAIC)
 }
 
 #model weights table
@@ -952,7 +942,7 @@ Once again, SowAge comes out on top!
 Graphing from NIMBLE isn't any different but just for kicks, here's the code to do it. 
 
 ```{r}
-variables <- summary(sowage.outputs[,1:31,])$quantiles
+variables <- summary(sowage.outputs)$quantiles
 daily.surv <- cum.surv <- matrix(NA, nrow = n.sow, ncol = 42)
 for(i in 1:n.sow){
 #plogis(beta.0 + beta.Sow + beta.age*age)
